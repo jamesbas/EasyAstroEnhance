@@ -1,0 +1,38 @@
+[project]
+name = "easyastroenhance"
+version = "1.0.0"
+description = "Local, deterministic enhancement of telescope photographs (JPEG, TIFF, stacked FITS)."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "python-multipart",
+    "pydantic",
+    "numpy",
+    "scipy",
+    "pillow",
+    "tifffile",
+    "imagecodecs",
+    "astropy",
+    "psutil",
+]
+
+[project.optional-dependencies]
+# Installed only by scripts/setup-gpu.ps1. CPU-only installs never touch this extra.
+gpu = ["cupy-cuda13x[ctk]"]
+
+[dependency-groups]
+dev = ["pytest", "httpx"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+    "gpu: requires a working NVIDIA CUDA device (skipped otherwise)",
+    "realfiles: requires user-provided real images in samplepics/ (skipped otherwise)",
+]
+filterwarnings = ["ignore::DeprecationWarning"]
+

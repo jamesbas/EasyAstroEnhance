@@ -1,0 +1,80 @@
+"""Pydantic request/response models for the local /api/v1 API."""
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from ..processing.recipe import Recipe
+
+
+class Rect(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    x: int
+    y: int
+    w: int
+    h: int
+
+
+class InterpretationIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    hdu: int | None = None
+    layout: str | None = None
+    state: Literal["linear", "rendered", "unsure"] | None = None
+
+
+class RegionsIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    regions: list[Rect] = Field(default_factory=list, max_length=32)
+
+
+class BackgroundIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    method: Literal["constant", "planar"]
+    samples: list[Rect] = Field(default_factory=list, max_length=64)
+    strength: float = Field(0.5, ge=0.0, le=1.0)
+    confirmed: bool = False
+
+
+class PresetIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=60)
+    recipe: dict[str, Any]
+
+
+class PresetPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(None, min_length=1, max_length=60)
+    recipe: dict[str, Any] | None = None
+
+
+class JobCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_key: str = Field(min_length=8, max_length=80)
+    asset_ids: list[str] = Field(min_length=1, max_length=50)
+    recipe: Recipe
+    preset_id: str | None = None
+    force: bool = False
+
+
+class ComputePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    device: Literal["auto", "gpu", "cpu"] | None = None
+    gpu_memory_fraction: float | None = Field(None, ge=0.1, le=0.7)
+    ram_fraction: float | None = Field(None, ge=0.2, le=0.8)
+
+
+class SettingsPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    strip_location: bool | None = None
+
+
+class BatchExportIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    run_ids: list[str] = Field(min_length=1, max_length=200)
+    include: list[Literal["tiff", "jpeg", "comparison", "fits", "linear-tiff"]] = Field(default_factory=list)
+
+
+class ConfirmIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirm: bool = False
