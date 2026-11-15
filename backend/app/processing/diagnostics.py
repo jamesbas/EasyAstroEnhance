@@ -46,7 +46,9 @@ def smoothstep_np(x: np.ndarray) -> np.ndarray:
 def clip_report(src, out_preclip, eligible, xp=np) -> dict[str, Any]:
     """Separate source clipping from *new* clipping using per-pixel transitions (not total counts).
 
-    Invalid and protected pixels are excluded via ``eligible`` (H x W boolean). Works on NumPy or CuPy
+    Invalid and protected pixels are excluded via ``eligible`` (H x W boolean). A color pixel that is already
+    black (or saturated) in any channel of the source display counts as source clipping for all its channels,
+    so dark defects and saturated star cores are not reported as new clipping. Works on NumPy or CuPy
     arrays (pass ``xp``); only small integer counts leave the device.
     """
     e = eligible if src.ndim == 2 else eligible[..., None]
@@ -56,8 +58,13 @@ def clip_report(src, out_preclip, eligible, xp=np) -> dict[str, Any]:
     in_max = (src >= 1.0) & eb
     out_zero = (out_preclip <= 0.0) & eb
     out_max = (out_preclip >= 1.0) & eb
-    new_black = out_zero & ~in_zero
-    new_white = out_max & ~in_max
+    if src.ndim == 3:
+        src_black = xp.broadcast_to((src <= 0.0).any(axis=-1, keepdims=True), src.shape)
+        src_white = xp.broadcast_to((src >= 1.0).any(axis=-1, keepdims=True), src.shape)
+    else:
+        src_black, src_white = in_zero, in_max
+    new_black = out_zero & ~src_black
+    new_white = out_max & ~src_white
     c = lambda m: int(m.sum())  # noqa: E731
     return {
         "eligible_channel_values": n,

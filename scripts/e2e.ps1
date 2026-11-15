@@ -1,6 +1,8 @@
 <#
 .SYNOPSIS  Playwright end-to-end tests against a temporary server (own data directory, spare port). Uses installed Microsoft Edge.
+  Optional: spec file filters, e.g. .\scripts\e2e.ps1 stacking
 #>
+param([string[]]$Specs = @())
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $port = 8791
@@ -18,7 +20,10 @@ try {
         $env:EAE_BASE_URL = "http://127.0.0.1:$port"
         $sample = Get-ChildItem (Join-Path $root 'samplepics') -Filter *.jpg -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($sample) { $env:EAE_TEST_JPEG = $sample.FullName }
-        npx playwright test
+        $stackDir = Join-Path $data 'stack-subs\M 99_sub'
+        & $py -c "import sys; sys.path[:0] = [r'$(Join-Path $root 'backend')', r'$(Join-Path $root 'backend\tests')']; from pathlib import Path; from stack_fixtures import _make_subs; _make_subs(Path(r'$stackDir'), n=6)"
+        if ($LASTEXITCODE -eq 0) { $env:EAE_STACK_DIR = $stackDir }
+        npx playwright test @Specs
         if ($LASTEXITCODE -ne 0) { throw 'Playwright tests failed' }
     } finally { Pop-Location }
 } finally {

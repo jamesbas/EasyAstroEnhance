@@ -116,6 +116,17 @@ def serialize_asset(db: Database, coord: Coordinator, cfg: Config, a: dict[str, 
         "SELECT i.* FROM job_items i JOIN jobs j ON j.id=i.job_id WHERE i.asset_id=? ORDER BY j.created_at DESC, i.position DESC LIMIT 1", (a["id"],)
     )
     run = db.one("SELECT * FROM runs WHERE asset_id=? ORDER BY created_at DESC LIMIT 1", (a["id"],))
+    stk = db.one("SELECT id, name, report FROM stacks WHERE asset_id=?", (a["id"],))
+    stack_info = None
+    if stk and stk.get("report"):
+        r = stk["report"]
+        stack_info = {
+            "id": stk["id"], "name": stk["name"], "mode": r.get("mode"), "frames_used": r.get("frames_used"),
+            "frames_total": r.get("frames_total"), "rejected_frames": r.get("rejected_frames", []),
+            "total_exposure_s": (r.get("lights") or {}).get("total_exposure_s"), "drizzle": bool(r.get("drizzle")),
+            "seconds": r.get("seconds"), "calibration": {k: (r.get("calibration") or {}).get(k, 0) for k in ("darks", "flats", "bias", "dark_flats")},
+            "defective_pixels": ((r.get("calibration") or {}).get("defective_pixels") or {}).get("count"),
+        }
     status = a["status"]
     if status == "failed":
         label = "Failed"
@@ -154,5 +165,6 @@ def serialize_asset(db: Database, coord: Coordinator, cfg: Config, a: dict[str, 
         "latest_item": serialize_item(db, coord, item) if item else None,
         "latest_run": serialize_run(run) if run else None,
         "run_count": db.one("SELECT COUNT(*) AS n FROM runs WHERE asset_id=?", (a["id"],))["n"],
+        "stack": stack_info,
         "created_at": a["created_at"],
     }

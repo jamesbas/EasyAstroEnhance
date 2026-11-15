@@ -6,7 +6,7 @@ import pytest
 from scipy import ndimage
 
 from app.processing import background as bg
-from app.processing import local_contrast as lcm
+from app.processing import finishing as fin
 from app.processing import tone
 from app.processing.backends import NumpyBackend
 from app.processing.denoise import estimate_noise
@@ -15,16 +15,28 @@ from app.processing.export import encode_png, quantize
 from app.processing.imagedata import ProcessingError
 from app.processing.pipeline import AssetContext, ExecutionOptions, run_pipeline
 from app.processing.recipe import (
-    AdvancedRecipe, BackgroundRecipe, Recipe, Switch, ToneRecipe, builtin_presets, no_operations_recipe, parse_recipe, RecipeCompatibilityError,
+    AdvancedRecipe, AutoRecipe, BackgroundRecipe, Recipe, ToneRecipe, builtin_presets, no_operations_recipe, parse_recipe, RecipeCompatibilityError,
 )
 from app.processing.star_protection import detect_stars
 from conftest import linear_field, make_image, synthetic_field
 
 import imagecodecs
 
+NOOP_LOOK = no_operations_recipe().look
+NOOP_AUTO = no_operations_recipe().auto
+
+
+def look(**kw):
+    """The no-operation look with only the given sliders set."""
+    return NOOP_LOOK.model_copy(update=kw)
+
+
+def auto(**kw):
+    return NOOP_AUTO.model_copy(update=kw)
+
 
 def only(**kw) -> Recipe:
-    """A recipe with everything off except the given switches."""
+    """A recipe with everything off except the given sections."""
     base = no_operations_recipe()
     return base.model_copy(update=kw)
 
@@ -113,7 +125,7 @@ def test_denoise_reduces_noise_and_preserves_faint_source_flux_and_position():
     clean = 0.2 + blob
     noisy = np.clip(clean + rng.normal(0, 0.02, clean.shape), 0, 1).astype(np.float32)
     img = make_image(noisy)
-    out = run(img, only(denoise=Switch(strength="strong"))).display
+    out = run(img, only(look=look(noise=1.0))).display
     flat = (slice(5, 40), slice(5, 40))
     assert out[flat].std() < noisy[flat].std() * 0.9
     resid_before, resid_after = noisy - clean, out - clean
@@ -138,7 +150,7 @@ def test_chroma_not_smeared_across_star_boundaries():
     star = np.exp(-(((xx - sx) ** 2 + (yy - sy) ** 2) / 4.0))
     arr[..., 0] = np.clip(arr[..., 0] + 0.6 * star, 0, 1)  # a strongly red star
     img = make_image(arr.astype(np.float32))
-    res = run(img, only(denoise=Switch(strength="strong")))
+    res = run(img, only(look=look(noise=1.0)))
     ring = (np.hypot(yy - sy, xx - sx) > 6) & (np.hypot(yy - sy, xx - sx) < 10)
     delta_red = (res.display[..., 0] - res.display[..., 1])[ring].mean() - (arr[..., 0] - arr[..., 1])[ring].mean()
     assert abs(delta_red) < 0.02
@@ -151,7 +163,7 @@ def test_protected_region_is_exactly_restored_and_excluded_from_statistics():
     arr[135:155, 10:190, :] = 0.95  # bright caption "lettering"
     img = make_image(arr)
     region = [{"x": 0, "y": 130, "w": 200, "h": 30}]
-    r = Recipe(**{**builtin_presets()["brighter-detail"].model_dump(), "local_contrast": {"enabled": True, "strength": "balanced"}})
+    r = builtin_presets()["vivid"]
     res = run(img, r, AssetContext(regions=region))
     assert np.array_equal(res.display[130:], img.pixels[130:])  # restored in the same display domain
     base_noise = estimate_noise(arr[:128], np.ones((128, 200), bool), None, 1e-6)["sigma_residual"]
@@ -182,8 +194,9 @@ def test_star_mask_smooth_and_reduces_core_brightening_without_moving_stars():
     assert star.reliable and star.stats["accepted"] >= 20
     gy, gx = np.gradient(star.soft)
     assert np.hypot(gy, gx).max() < 0.35  # feathered, no abrupt mask edges
-    on = run(img, only(tone=ToneRecipe(enabled=True, strength="strong"), star_protection=Switch(strength="strong")))
-    off = run(img, only(tone=ToneRecipe(enabled=True, strength="strong"), star_protection=Switch(enabled=False)))
+    stretch = only(tone=ToneRecipe(enabled=True), look=look(stretch=1.0))
+    on = run(img, stretch.model_copy(update={"auto": auto(star_stretch=True), "advanced": AdvancedRecipe(star_stretch_amount=0.9)}))
+    off = run(img, stretch)
     ys, xs, amps = zip(*stars)
     cores = [(int(round(y)), int(round(x))) for y, x, a in stars if a > 0.5]
     gain_on = np.mean([on.display[y, x].mean() - arr[y, x].mean() for y, x in cores])
@@ -194,7 +207,7 @@ def test_star_mask_smooth_and_reduces_core_brightening_without_moving_stars():
         a = np.unravel_index(np.argmax(on.display[win].mean(-1)), (7, 7))
         b = np.unravel_index(np.argmax(arr[win].mean(-1)), (7, 7))
         assert abs(a[0] - b[0]) <= 1 and abs(a[1] - b[1]) <= 1  # positions preserved
-    op = [o for o in on.report["operations"] if o["name"] == "star_protection"][0]
+    op = [o for o in on.report["operations"] if o["name"] == "star_stretch"][0]
     assert op["status"] == "applied"
 
 
@@ -207,53 +220,53 @@ def test_broad_galaxy_core_is_not_in_the_star_mask():
     assert (not star.reliable) or star.soft[100, 130] < 0.05
 
 
-def test_star_protection_inactive_when_tone_disabled_and_skipped_when_unreliable():
+def test_star_stretch_inactive_when_tone_disabled_and_skipped_when_unreliable():
     arr, _ = synthetic_field(n_stars=0, galaxy=False)
     img = make_image(arr)
-    r1 = run(img, only(star_protection=Switch(), denoise=Switch(strength="gentle")))
-    op = [o for o in r1.report["operations"] if o["name"] == "star_protection"][0]
+    r1 = run(img, only(auto=auto(star_stretch=True), look=look(noise=0.3)))
+    op = [o for o in r1.report["operations"] if o["name"] == "star_stretch"][0]
     assert op["status"] == "inactive"
-    r2 = run(img, only(star_protection=Switch(), tone=ToneRecipe()))
-    op2 = [o for o in r2.report["operations"] if o["name"] == "star_protection"][0]
-    assert op2["status"] == "skipped" and "highlight roll-off" in op2["reason"]
+    r2 = run(img, only(auto=auto(star_stretch=True), tone=ToneRecipe()))
+    op2 = [o for o in r2.report["operations"] if o["name"] == "star_stretch"][0]
+    assert op2["status"] == "skipped" and "Highlight convergence" in op2["reason"]
 
 
-# ------------------------------------------------------------------------------ local contrast
-def test_local_contrast_off_is_identity_and_gates_sky_noise():
+# ------------------------------------------------------------------------------ multiscale detail
+def test_detail_off_is_identity_and_gates_sky_noise():
     arr, _ = synthetic_field(rgb=False, galaxy=False, n_stars=0, noise=0.01, sky=0.2)
     img = make_image(arr)
     off = run(img, only(tone=ToneRecipe(enabled=False))).display
     assert np.array_equal(off, arr)
-    lc = run(img, only(local_contrast=Switch(strength="strong"))).display
+    lc = run(img, only(look=look(detail=1.0))).display
     assert np.abs(lc - arr).mean() < 0.002  # noise-dominated sky is gated, not amplified
 
 
-def test_local_contrast_boosts_existing_medium_scale_structure_without_ringing():
+def test_detail_boosts_existing_medium_scale_structure_without_halos():
     h, w = 240, 240
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
     structure = 0.04 * np.sin(xx / 6.0) * np.exp(-(((xx - 120) / 70) ** 2 + ((yy - 120) / 70) ** 2))
     step = (xx > 190).astype(np.float32) * 0.3
     arr = np.clip(0.3 + structure + step + np.random.default_rng(1).normal(0, 0.001, (h, w)), 0, 1).astype(np.float32)
     img = make_image(arr)
-    res = run(img, only(local_contrast=Switch(strength="strong"), advanced=AdvancedRecipe(local_contrast_scale_px=24.0))).display
+    res = run(img, only(look=look(detail=1.0), advanced=AdvancedRecipe(detail_scale_px=16.0))).display
     center = (slice(80, 160), slice(80, 160))
     assert (res[center] - arr[center]).std() > 0.002  # structure boosted
-    assert np.abs(res - arr).max() <= lcm.BOOST_CAP + 1e-6  # bounded
+    assert np.abs(res - arr).max() <= fin.DETAIL_CAP + 1e-6  # bounded
     edge = res[100:140, 192:215] - arr[100:140, 192:215]
     assert np.abs(edge).max() < 0.03  # no halos beside a sharp transition
 
 
-def test_local_contrast_scale_is_in_full_resolution_pixels_in_report():
+def test_detail_scale_is_in_full_resolution_pixels_in_report():
     arr, _ = synthetic_field(rgb=False)
-    res = run(make_image(arr), only(local_contrast=Switch(), advanced=AdvancedRecipe(local_contrast_scale_px=32.0)))
-    lc = [o for o in res.report["operations"] if o["name"] == "local_contrast"][0]
-    assert lc["parameters"]["coarse_scale_full_res_px"] == 32.0 and lc["parameters"]["tile_halo_px"] > 0
+    res = run(make_image(arr), only(look=look(detail=0.5), advanced=AdvancedRecipe(detail_scale_px=32.0)))
+    lc = [o for o in res.report["operations"] if o["name"] == "detail"][0]
+    assert lc["parameters"]["largest_scale_full_res_px"] == 32 and lc["parameters"]["tile_halo_px"] > 0
 
 
 # ------------------------------------------------------------------------------ tiling parity
 def test_tiled_matches_full_frame_for_rendered_and_linear():
     arr, _ = synthetic_field(h=210, w=250, n_stars=50, seed=11)
-    r = Recipe(**{**builtin_presets()["brighter-detail"].model_dump(), "local_contrast": {"enabled": True, "strength": "gentle"}})
+    r = builtin_presets()["vivid"]
     full = run(make_image(arr), r)
     tiled = run(make_image(arr), r, force_tile=96)
     assert tiled.report["execution"]["tile"] == 96
@@ -269,7 +282,7 @@ def test_tiled_matches_full_frame_for_rendered_and_linear():
 
 def test_repeated_processing_is_deterministic():
     arr, _ = synthetic_field(seed=8)
-    r = builtin_presets()["brighter-detail"]
+    r = builtin_presets()["vivid"]
     a = run(make_image(arr), r).display
     b = run(make_image(arr), r).display
     assert np.array_equal(a, b)
@@ -437,7 +450,11 @@ def test_recipe_validation_bounds_and_incompatible_schema():
         parse_recipe({"schema_version": 1})
     assert "Recreate the preset" in str(e.value)
     with pytest.raises(RecipeCompatibilityError):
-        parse_recipe({"schema_version": 2, "regions": [{"x": 1}]})  # per-image data cannot ride in a recipe/preset
+        parse_recipe({"schema_version": 2})  # engine 1.0 recipes are not silently reinterpreted
+    with pytest.raises(RecipeCompatibilityError):
+        parse_recipe({"schema_version": 3, "regions": [{"x": 1}]})  # per-image data cannot ride in a recipe/preset
+    with pytest.raises(RecipeCompatibilityError):
+        parse_recipe({"schema_version": 3, "look": {"color": 2.0}})  # sliders are bounded
 
 
 def test_nonfinite_pixels_are_masked_not_dark_stars():

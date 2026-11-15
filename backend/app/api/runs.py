@@ -46,7 +46,7 @@ async def get_run(request: Request, run_id: str) -> dict[str, Any]:
     applied = None
     if report_path.exists():
         full = json.loads(report_path.read_text(encoding="utf-8"))
-        applied = {k: full["applied"].get(k) for k in ("summary", "clipping", "execution", "protected_regions", "baseline_frame", "enhanced_frame", "noise_estimate")}
+        applied = {k: full["applied"].get(k) for k in ("summary", "clipping", "execution", "protected_regions", "baseline_frame", "enhanced_frame", "linear_preparation", "decisions", "noise_estimate")}
         applied["operations"] = full["applied"]["operations"]
     has_fixed = (cfg_of(request).runs_dir / run_id / "display_fixed.npy").exists()
     return {**serialize_run(r), "applied": applied, "has_fixed_mapping": has_fixed}
@@ -169,6 +169,8 @@ async def clear_history(request: Request, body: ConfirmIn) -> dict[str, Any]:
     db, cfg = db_of(request), cfg_of(request)
     if db.one("SELECT 1 AS x FROM job_items WHERE state IN ('queued','running')"):
         raise ApiError(409, "JOBS_ACTIVE", "Cancel active jobs before clearing history.")
+    if db.one("SELECT 1 AS x FROM stacks WHERE state IN ('queued','running')"):
+        raise ApiError(409, "JOBS_ACTIVE", "Cancel the running stack before clearing history.")
     import stat
 
     for d in (cfg.assets_dir, cfg.runs_dir, cfg.exports_dir, cfg.tmp_dir):
@@ -180,7 +182,7 @@ async def clear_history(request: Request, body: ConfirmIn) -> dict[str, Any]:
                     pass
             shutil.rmtree(d, ignore_errors=True)
         d.mkdir(parents=True, exist_ok=True)
-    for table in ("job_items", "jobs", "runs", "assets", "exports"):
+    for table in ("job_items", "jobs", "runs", "assets", "exports", "stacks"):
         db.execute(f"DELETE FROM {table}")
     return {"cleared": True}
 

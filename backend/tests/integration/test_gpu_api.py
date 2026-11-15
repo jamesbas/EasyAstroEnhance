@@ -25,9 +25,9 @@ def test_gpu_job_reports_actual_backend_and_matches_cpu_output(client, tmp_path,
     probed = client.post("/api/v1/compute/probe").json()
     assert probed["gpu_usable"] and probed["probe"]["device_name"] and probed["resolved_label"] == "Processing: GPU + CPU"
     client.patch("/api/v1/settings/compute", json={"device": "gpu"})
-    g = run_job(client, [a["id"]], default_recipe(client, "brighter-detail"), key="gpu-api-0001")
+    g = run_job(client, [a["id"]], default_recipe(client, "vivid"), key="gpu-api-0001")
     client.patch("/api/v1/settings/compute", json={"device": "cpu"})
-    c = run_job(client, [a["id"]], default_recipe(client, "brighter-detail"), key="cpu-api-0001")
+    c = run_job(client, [a["id"]], default_recipe(client, "vivid"), key="cpu-api-0001")
     rg = client.get(f"/api/v1/runs/{g['items'][0]['run_id']}").json()
     rc = client.get(f"/api/v1/runs/{c['items'][0]['run_id']}").json()
     assert rg["applied"]["execution"]["actual_backend"] == "gpu" and rg["backend_label"] == "Processing: GPU + CPU"

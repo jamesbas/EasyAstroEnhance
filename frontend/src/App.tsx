@@ -11,8 +11,13 @@ import { Toaster } from './components/Modal';
 import { ResultNote } from './components/ResultNote';
 import { RunHistory } from './components/RunHistory';
 import { SettingsDialog } from './components/SettingsDialog';
+import { StackBanner } from './components/StackBanner';
+import { StackDialog } from './components/StackDialog';
+import { StackInfo } from './components/StackInfo';
 import { UploadPanel } from './components/UploadPanel';
 import { useBgDrafts } from './hooks/useBgDrafts';
+import { useAIModels } from './hooks/useAIModels';
+import { useAppVersion } from './hooks/useAppVersion';
 import { useCompute } from './hooks/useCompute';
 import { useRecipe } from './hooks/useRecipe';
 import { useRunDetail, useRunHistory } from './hooks/useRunHistory';
@@ -39,10 +44,12 @@ export default function App() {
   const toasts = useToasts();
   const { notify, error: notifyError } = toasts;
   const ws = useWorkspace();
-  const { assets, activeJobs, upsert, refresh, remove } = ws;
+  const { assets, activeJobs, activeStacks, upsert, refresh, remove } = ws;
   const compute = useCompute();
+  const appVersion = useAppVersion();
   const reportError = useCallback((err: unknown) => notifyError(err), [notifyError]);
   const rec = useRecipe(reportError);
+  const aiModels = useAIModels(reportError);
   const sel = useSelection(assets);
   const { choose } = sel;
   const drafts = useBgDrafts();
@@ -50,6 +57,7 @@ export default function App() {
 
   const [uploading, setUploading] = useState<{ progress: number; count: number } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [stackOpen, setStackOpen] = useState(false);
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
   const [forced, setForced] = useState<ForcedIntake | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -120,6 +128,41 @@ export default function App() {
       seenItems.current.set(a.id, key);
     }
   }, [assets, notify]);
+
+  // A stack that leaves the active list has finished: report it and show the new stacked image.
+  const seenStacks = useRef(new Set<string>());
+  useEffect(() => {
+    const now = new Set(activeStacks.map((s) => s.id));
+    const gone = [...seenStacks.current].filter((id) => !now.has(id));
+    seenStacks.current = now;
+    for (const id of gone) {
+      void api.getStack(id).then(async (s) => {
+        if (s.state === 'succeeded' && s.report) {
+          const r = s.report;
+          const skipped = r.frames_total - r.frames_used;
+          notify('success', `Stacked ${r.frames_used} frame${r.frames_used === 1 ? '' : 's'} of ${s.name}${skipped ? ` (${skipped} poor or unaligned frame${skipped === 1 ? '' : 's'} skipped)` : ''}.${s.auto_enhance ? ' Enhancing now.' : ' Adjust the settings, then Enhance.'}`);
+          if (s.asset_id) {
+            upsert([await api.getAsset(s.asset_id)]);
+            choose([s.asset_id], s.asset_id);
+          }
+          void refresh();
+        } else if (s.state === 'failed') {
+          notify('error', `Stacking ${s.name} failed: ${s.error?.message ?? 'unknown error'}`);
+        } else if (s.state === 'cancelled') {
+          setAnnouncement(`Stacking ${s.name} was cancelled.`);
+        }
+      }, (err: unknown) => notifyError(err));
+    }
+  }, [activeStacks, refresh, choose, upsert, notify, notifyError]);
+
+  const cancelStack = useCallback(async (id: string) => {
+    try {
+      await api.cancelStack(id);
+      await refresh();
+    } catch (err) {
+      notifyError(err);
+    }
+  }, [refresh, notifyError]);
 
   const wasOffline = useRef(false);
   useEffect(() => {
@@ -312,6 +355,12 @@ export default function App() {
         {hasAssets ? <h1 className="brand">EasyAstroEnhance</h1> : <span />}
         <div className="topbar-actions">
           {hasAssets && <UploadPanel variant="compact" onFiles={(f) => void handleFiles(f)} uploading={uploading !== null} />}
+          {hasAssets && <button type="button" className="btn" onClick={() => setStackOpen(true)} data-testid="stack-button">Stack frames…</button>}
+          {appVersion && (
+            <span className="version-chip" data-testid="app-version" title={`EasyAstroEnhance version ${appVersion.version} (processing engine; recipe schema ${appVersion.recipeSchema}; stacking ${appVersion.stackVersion})`}>
+              v{appVersion.version}
+            </span>
+          )}
           <button type="button" className="chip" onClick={() => setSettingsOpen(true)} data-testid="processing-chip" title="Processing device">
             {compute.compute?.resolved_label ?? 'Processing: checking…'}
           </button>
@@ -331,6 +380,8 @@ export default function App() {
         </div>
       )}
 
+      <StackBanner stacks={activeStacks} onCancel={(id) => void cancelStack(id)} />
+
       {uploading && (
         <div className="upload-progress" role="status" data-testid="upload-progress">
           <span>
@@ -342,7 +393,7 @@ export default function App() {
 
       <main className="main">
         {!hasAssets ? (
-          ws.loaded ? <UploadPanel variant="empty" onFiles={(f) => void handleFiles(f)} uploading={uploading !== null} /> : <p className="muted pad">Loading…</p>
+          ws.loaded ? <UploadPanel variant="empty" onFiles={(f) => void handleFiles(f)} uploading={uploading !== null} onStack={() => setStackOpen(true)} /> : <p className="muted pad">Loading…</p>
         ) : (
           <div className="workspace">
             <ImageQueue
@@ -382,6 +433,7 @@ export default function App() {
                     <ExportMenu run={displayedRun} batchRunIds={batchRunIds} onError={reportError} />
                   </div>
                   <ResultNote asset={primary} run={displayedRun} />
+                  <StackInfo asset={primary} />
                   {primary.status === 'needs_input' && (
                     <div className="callout" data-testid="preview-only-note">
                       <strong>Preview only.</strong> {primary.intake_message ?? 'Confirm how this image was saved to enable enhancing.'}{' '}
@@ -406,6 +458,8 @@ export default function App() {
               presets={rec.presets}
               presetId={rec.presetId}
               edit={rec.edit}
+              setAI={rec.setAI}
+              aiModels={aiModels}
               selectPreset={rec.selectPreset}
               savePreset={async (name) => { await rec.savePreset(name); notify('success', `Saved preset “${name}”.`); }}
               reloadPresets={async () => { await rec.reloadPresets(); }}
@@ -448,8 +502,24 @@ export default function App() {
         <SettingsDialog
           onClose={() => setSettingsOpen(false)}
           onCompute={compute.setCompute}
+          version={appVersion}
+          aiModels={aiModels}
           busyJobs={busyJobs}
           onHistoryCleared={() => { void refresh(); setSettingsOpen(false); }}
+        />
+      )}
+      {stackOpen && (
+        <StackDialog
+          recipe={rec.recipe}
+          presetId={rec.recipe && rec.recipe.preset !== 'custom' ? rec.recipe.preset : null}
+          settingsLabel={rec.presets.find((p) => p.id === rec.presetId)?.name ?? 'custom settings'}
+          newKey={newKey}
+          onClose={() => setStackOpen(false)}
+          onStarted={(s) => {
+            setStackOpen(false);
+            setAnnouncement(`Started stacking ${s.name}.`);
+            void refresh();
+          }}
         />
       )}
       {dragging && hasAssets && <div className="drop-overlay" aria-hidden="true"><p>Drop to add photos</p></div>}

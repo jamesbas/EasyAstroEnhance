@@ -24,7 +24,7 @@ test.describe('intake questions', () => {
     const status = page.getByTestId('asset-status');
     await expect(status).toHaveText('Ready', { timeout: 30_000 });
     await expect(page.getByTestId('label-original')).toHaveText('Original shown with a display stretch');
-    await expect(page.getByTestId('switch-color')).toBeDisabled();
+    await expect(page.getByTestId('slider-color')).toBeDisabled();
     await expect(page.getByText('Not available for monochrome images.')).toBeVisible();
     await expect(page.getByTestId('asset-card')).toContainText('Monochrome');
     await page.getByTestId('enhance-selected').click();

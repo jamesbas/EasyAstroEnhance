@@ -15,6 +15,9 @@ dependencies = [
     "imagecodecs",
     "astropy",
     "psutil",
+    # Optional AI tools (opt-in per run): ONNX inference of third-party models. DirectML runs on any DirectX 12 GPU.
+    "onnxruntime-directml; sys_platform == 'win32'",
+    "onnxruntime; sys_platform != 'win32'",
 ]
 
 [project.optional-dependencies]
@@ -22,7 +25,7 @@ dependencies = [
 gpu = ["cupy-cuda13x[ctk]"]
 
 [dependency-groups]
-dev = ["pytest", "httpx"]
+dev = ["pytest", "httpx", "onnx"]
 
 [tool.uv]
 package = false
@@ -32,7 +35,8 @@ pythonpath = ["."]
 testpaths = ["tests"]
 markers = [
     "gpu: requires a working NVIDIA CUDA device (skipped otherwise)",
-    "realfiles: requires user-provided real images in samplepics/ (skipped otherwise)",
+    "realfiles: requires user-provided real images in samplepics/ or EAE_SEESTAR_DIR (skipped otherwise)",
+    "aimodels: requires the downloaded AI models in the app data folder or EAE_AI_MODELS_DIR (skipped otherwise)",
 ]
 filterwarnings = ["ignore::DeprecationWarning"]
 

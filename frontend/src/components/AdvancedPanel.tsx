@@ -2,8 +2,11 @@ import { useEffect, useState } from 'react';
 import { api } from '../api/client';
 import type { Asset, Recipe, Rect, StarMaskResult } from '../api/types';
 import { useToasts } from '../hooks/useToasts';
-import { ADVANCED_BOUNDS } from '../lib/recipe';
+import { ADVANCED_BOUNDS, AUTO_STAGES } from '../lib/recipe';
+import type { NumericBound } from '../lib/recipe';
 import { Histogram } from './Histogram';
+
+const INTEGER_KEYS = new Set<NumericBound['key']>(['gradient_degree', 'denoise_scales', 'deconvolution_iterations']);
 
 interface StarMaskState {
   on: boolean;
@@ -95,18 +98,42 @@ function stateText(asset: Asset): string {
 }
 
 export function AdvancedPanel({ asset, recipe, edit, star, onChangeState, onAssetUpdated }: AdvancedPanelProps) {
-  const setAdv = (key: keyof Recipe['advanced'], raw: string, min: number, max: number) => {
+  const setAdv = (key: NumericBound['key'], raw: string, min: number, max: number) => {
     const n = raw.trim() === '' ? null : Number(raw);
     edit((r) => {
-      r.advanced[key] = n === null || !Number.isFinite(n) ? null : Math.min(max, Math.max(min, n));
+      if (n === null || !Number.isFinite(n)) {
+        r.advanced[key] = null;
+        return;
+      }
+      const v = Math.min(max, Math.max(min, n));
+      r.advanced[key] = INTEGER_KEYS.has(key) ? Math.round(v) : v;
     });
   };
-  const anyAdvanced = Object.values(recipe.advanced).some((v) => v !== null);
+  const anyAdvanced = ADVANCED_BOUNDS.some((b) => recipe.advanced[b.key] !== null);
 
   return (
     <details className="disclosure" data-testid="advanced-disclosure">
       <summary>Advanced</summary>
       <div className="disclosure-body">
+        <div className="adv-block">
+          <h4>Automatic steps</h4>
+          <p className="muted small">Each step measures the image and runs, or is skipped with a reason in the processing report.</p>
+          <label className="check small">
+            <input type="checkbox" checked={recipe.tone.enabled} onChange={(e) => edit((r) => { r.tone.enabled = e.target.checked; })} data-testid="auto-stretch" />
+            Stretch (automatic, hyperbolic with protected highlights)
+          </label>
+          {AUTO_STAGES.map((s) => (
+            <label key={s.key} className="check small" title={s.hint}>
+              <input type="checkbox" checked={recipe.auto[s.key]} onChange={(e) => edit((r) => { r.auto[s.key] = e.target.checked; })} data-testid={`auto-${s.key}`} />
+              {s.label} <span className="muted">— {s.hint}</span>
+            </label>
+          ))}
+          <label className="check small">
+            <input type="checkbox" checked={recipe.advanced.deconvolution} onChange={(e) => edit((r) => { r.advanced.deconvolution = e.target.checked; })} data-testid="auto-deconvolution" />
+            Sharpen by deconvolution (experimental, linear stacks; off by default) <span className="muted">— a sharper look is not added resolution</span>
+          </label>
+        </div>
+
         {asset && (
           <div className="adv-block">
             <h4>Input state</h4>
@@ -134,7 +161,7 @@ export function AdvancedPanel({ asset, recipe, edit, star, onChangeState, onAsse
 
         <div className="adv-block">
           <h4>Exact values</h4>
-          <p className="muted small">Leave a field empty to use the Gentle / Balanced / Strong button instead.</p>
+          <p className="muted small">Leave a field empty to let Enhance choose it from the image.</p>
           <div className="adv-grid">
             {ADVANCED_BOUNDS.map((b) => (
               <label key={b.key} className="field">
@@ -154,7 +181,7 @@ export function AdvancedPanel({ asset, recipe, edit, star, onChangeState, onAsse
               </label>
             ))}
           </div>
-          <button type="button" className="btn tiny" disabled={!anyAdvanced} onClick={() => edit((r) => { for (const k of Object.keys(r.advanced) as (keyof Recipe['advanced'])[]) r.advanced[k] = null; })}>
+          <button type="button" className="btn tiny" disabled={!anyAdvanced} onClick={() => edit((r) => { for (const b of ADVANCED_BOUNDS) r.advanced[b.key] = null; })}>
             Clear exact values
           </button>
         </div>

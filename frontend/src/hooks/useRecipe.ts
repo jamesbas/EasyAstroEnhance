@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client';
-import type { Preset, Recipe } from '../api/types';
+import type { AITool, Preset, Recipe } from '../api/types';
 import { cloneRecipe } from '../lib/recipe';
 
 export interface RecipeState {
@@ -8,6 +8,7 @@ export interface RecipeState {
   presets: Preset[];
   presetId: string;
   edit: (mutate: (draft: Recipe) => void) => void;
+  setAI: (tool: AITool, on: boolean) => void;
   selectPreset: (id: string) => void;
   reloadPresets: () => Promise<Preset[]>;
   savePreset: (name: string) => Promise<Preset>;
@@ -58,7 +59,11 @@ export function useRecipe(onError: (err: unknown) => void): RecipeState {
         return;
       }
       const p = presets.find((x) => x.id === id);
-      if (p?.recipe && p.compatible) setRecipe({ ...cloneRecipe(p.recipe), preset: p.id });
+      // Built-in presets describe a look; the AI tool switches stay as the user set them. Saved presets bring their own.
+      if (p?.recipe && p.compatible) {
+        const next = p.recipe;
+        setRecipe((prev) => ({ ...cloneRecipe(next), preset: p.id, ai: p.builtin && prev ? { ...prev.ai } : { ...next.ai } }));
+      }
     },
     [presets],
   );
@@ -74,7 +79,11 @@ export function useRecipe(onError: (err: unknown) => void): RecipeState {
     [recipe, reloadPresets],
   );
 
+  const setAI = useCallback((tool: AITool, on: boolean) => {
+    setRecipe((prev) => (prev ? { ...prev, ai: { ...prev.ai, [tool]: on } } : prev));
+  }, []);
+
   const resetTo = useCallback((r: Recipe) => setRecipe(cloneRecipe(r)), []);
 
-  return { recipe, presets, presetId: recipe?.preset ?? 'natural', edit, selectPreset, reloadPresets, savePreset, resetTo };
+  return { recipe, presets, presetId: recipe?.preset ?? 'natural', edit, setAI, selectPreset, reloadPresets, savePreset, resetTo };
 }

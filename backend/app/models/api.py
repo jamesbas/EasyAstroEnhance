@@ -57,6 +57,26 @@ class JobCreate(BaseModel):
     force: bool = False
 
 
+class StackFolders(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    folder: str = Field(min_length=1, max_length=500)
+    mode: Literal["auto", "subs", "sessions"] = "auto"
+    darks: str | None = Field(default=None, max_length=500)
+    flats: str | None = Field(default=None, max_length=500)
+    bias: str | None = Field(default=None, max_length=500)
+    darkflats: str | None = Field(default=None, max_length=500)
+
+
+class StackCreate(StackFolders):
+    request_key: str = Field(min_length=8, max_length=80)
+    scale: Literal[1, 2] = 1
+    grading: Literal["off", "lenient", "standard", "strict"] = "standard"
+    rejection: Literal["sigma", "none"] = "sigma"
+    auto_enhance: bool = False
+    recipe: Recipe | None = None
+    preset_id: str | None = None
+
+
 class ComputePatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     device: Literal["auto", "gpu", "cpu"] | None = None

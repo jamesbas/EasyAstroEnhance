@@ -7,19 +7,27 @@ from fastapi import APIRouter, Request
 from ..db import new_id, now
 from ..models.api import PresetIn, PresetPatch
 from ..processing.recipe import (
-    PIPELINE_VERSION, RECIPE_SCHEMA_VERSION, RecipeCompatibilityError, builtin_presets, parse_recipe,
+    BUILTIN_PRESET_NAMES, MIGRATABLE_SCHEMAS, PIPELINE_VERSION, RECIPE_SCHEMA_VERSION, RecipeCompatibilityError, builtin_presets, parse_recipe,
 )
 from .common import ApiError, cfg_of, coord_of, db_of, serialize_asset
 
 router = APIRouter(prefix="/presets", tags=["presets"])
 
-BUILTIN_NAMES = {"natural": "Natural", "brighter-detail": "Brighter detail"}
-
 
 def seed_builtin_presets(db) -> None:
     t = now()
-    for pid, recipe in builtin_presets().items():
-        row = {"id": pid, "name": BUILTIN_NAMES[pid], "recipe": recipe.model_dump(), "schema_version": RECIPE_SCHEMA_VERSION, "engine_version": PIPELINE_VERSION, "builtin": 1, "updated_at": t}
+    current = builtin_presets()
+    for old in db.all("SELECT id FROM presets WHERE builtin=1"):
+        if old["id"] not in current:  # built-ins retired by an engine update
+            db.execute("DELETE FROM presets WHERE id=?", (old["id"],))
+    for p in db.all("SELECT * FROM presets WHERE builtin=0 AND schema_version IN (%s)" % ",".join("?" * len(MIGRATABLE_SCHEMAS)), tuple(MIGRATABLE_SCHEMAS)):
+        try:  # additive schema change: the saved settings keep their meaning
+            recipe = parse_recipe(p["recipe"]).model_dump()
+        except RecipeCompatibilityError:
+            continue
+        db.update("presets", p["id"], {"recipe": recipe, "schema_version": RECIPE_SCHEMA_VERSION, "updated_at": t})
+    for pid, recipe in current.items():
+        row = {"id": pid, "name": BUILTIN_PRESET_NAMES[pid], "recipe": recipe.model_dump(), "schema_version": RECIPE_SCHEMA_VERSION, "engine_version": PIPELINE_VERSION, "builtin": 1, "updated_at": t}
         if db.one("SELECT id FROM presets WHERE id=?", (pid,)):
             db.update("presets", pid, row)
         else:

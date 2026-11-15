@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api/client';
 import type { AppSettings, ComputeInfo, DevicePreference, HistorySummary } from '../api/types';
+import type { AIModels } from '../hooks/useAIModels';
+import type { AppVersion } from '../hooks/useAppVersion';
 import { useToasts } from '../hooks/useToasts';
 import { formatBytes } from '../lib/format';
 import { Modal } from './Modal';
@@ -10,6 +12,40 @@ interface SettingsDialogProps {
   onCompute: (c: ComputeInfo) => void;
   onHistoryCleared: () => void;
   busyJobs: boolean;
+  version: AppVersion | null;
+  aiModels: AIModels;
+}
+
+function AIModelsSection({ models }: { models: AIModels }) {
+  const o = models.overview;
+  return (
+    <section className="settings-section" data-testid="ai-models-section">
+      <h3>AI models</h3>
+      {!o ? <p className="muted small">Loading…</p> : (
+        <>
+          <p className="muted small">{o.note} Runs on: {o.provider_label ?? 'unavailable'}. Folder: {o.models_dir}</p>
+          <table className="ai-models">
+            <tbody>
+              {o.models.map((m) => (
+                <tr key={m.id} data-testid={`ai-model-${m.id}`}>
+                  <td><strong>{m.title}</strong> {m.version}<br /><span className="muted small">{m.attribution} · <a href={m.license_url} target="_blank" rel="noreferrer">{m.license}</a></span></td>
+                  <td className="small">{formatBytes(m.size)}</td>
+                  <td className="small">
+                    {m.state === 'installed' && <>Installed <button type="button" className="btn tiny" onClick={() => void models.remove(m.id)}>Remove</button></>}
+                    {m.state === 'downloading' && <>{Math.round((100 * m.received) / m.size)}% <button type="button" className="btn tiny" onClick={() => void models.cancel(m.id)}>Cancel</button></>}
+                    {(m.state === 'missing' || m.state === 'error') && (
+                      <>{m.state === 'error' && <span className="err-text">{m.error} </span>}
+                        <button type="button" className="btn tiny" onClick={() => void models.download(m.id)}>{m.local_graxpert_copy ? 'Copy from GraXpert' : 'Download'}</button></>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+    </section>
+  );
 }
 
 function gib(n?: number): string {
@@ -114,7 +150,7 @@ function HistorySection({ busyJobs, onCleared }: { busyJobs: boolean; onCleared:
   );
 }
 
-export function SettingsDialog({ onClose, onCompute, onHistoryCleared, busyJobs }: SettingsDialogProps) {
+export function SettingsDialog({ onClose, onCompute, onHistoryCleared, busyJobs, version, aiModels }: SettingsDialogProps) {
   const toasts = useToasts();
   const { error: notifyError } = toasts;
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -215,7 +251,18 @@ export function SettingsDialog({ onClose, onCompute, onHistoryCleared, busyJobs 
             <p className="muted small">Data folder: {settings.data_dir}</p>
           </section>
 
+          <AIModelsSection models={aiModels} />
+
           <HistorySection busyJobs={busyJobs} onCleared={onHistoryCleared} />
+
+          <section className="settings-section" data-testid="about-section">
+            <h3>About</h3>
+            <p className="small">
+              EasyAstroEnhance <strong data-testid="about-version">{version ? `v${version.version}` : '…'}</strong>
+              {version && <span className="muted"> · processing engine {version.version} · recipe schema {version.recipeSchema} · stacking {version.stackVersion}</span>}
+            </p>
+            <p className="muted small">Each result's processing report records the engine version that made it. If this differs from what you expect, restart the app and reload this page.</p>
+          </section>
         </>
       )}
       <div className="modal-actions">

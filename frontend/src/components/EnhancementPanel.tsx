@@ -1,12 +1,15 @@
 import type { ReactNode } from 'react';
-import type { Asset, Job, Preset, Recipe, Strength } from '../api/types';
+import type { AITool, Asset, Job, Preset, Recipe, Strength } from '../api/types';
+import type { AIModels } from '../hooks/useAIModels';
 import { backgroundPending, isMono } from '../lib/recipe';
 import type { BgDraft, ViewerTool } from '../types/ui';
 import { AdvancedPanel } from './AdvancedPanel';
+import { AIToolsPanel } from './AIToolsPanel';
 import { BackgroundPanel } from './BackgroundPanel';
 import { StrengthButtons, Switch } from './Controls';
 import { JobStatus } from './JobStatus';
 import { LabelRegionTool } from './LabelRegionTool';
+import { LookControls } from './LookControls';
 import { PresetBar } from './PresetBar';
 import { ToneControls } from './ToneControls';
 
@@ -22,6 +25,8 @@ export interface EnhancementPanelProps {
   presets: Preset[];
   presetId: string;
   edit: (mutate: (r: Recipe) => void) => void;
+  setAI: (tool: AITool, on: boolean) => void;
+  aiModels: AIModels;
   selectPreset: (id: string) => void;
   savePreset: (name: string) => Promise<void>;
   reloadPresets: () => Promise<void>;
@@ -100,16 +105,13 @@ export function EnhancementPanel(p: EnhancementPanelProps) {
       <div className="panel-scroll">
         <PresetBar presets={p.presets} presetId={p.presetId} disabled={false} onSelect={p.selectPreset} onSave={p.savePreset} onChanged={p.reloadPresets} />
 
+        <LookControls look={recipe.look} stretchOn={recipe.tone.enabled} mono={mono} edit={p.edit} />
+
+        <AIToolsPanel ai={recipe.ai} asset={asset} models={p.aiModels} onToggle={p.setAI} />
+
         <div className="options">
-          <OptionRow id="denoise" label="Reduce noise" hint="Cleans up grain while protecting structure." checked={recipe.denoise.enabled} strength={recipe.denoise.strength}
-            onChecked={(v) => p.edit((r) => { r.denoise.enabled = v; })} onStrength={(s) => p.edit((r) => { r.denoise.strength = s; })} />
-          <OptionRow id="tone" label="Bring out faint detail" hint="A controlled midtone stretch; linear data gets its own stretch path." checked={recipe.tone.enabled} strength={recipe.tone.strength}
-            onChecked={(v) => p.edit((r) => { r.tone.enabled = v; })} onStrength={(s) => p.edit((r) => { r.tone.strength = s; })} />
-          <OptionRow id="color" label="Enhance existing colors" disabled={mono} checked={recipe.color.enabled} strength={recipe.color.strength}
-            hint={mono ? 'Not available for monochrome images.' : 'A modest lift of colors already in the image.'}
-            onChecked={(v) => p.edit((r) => { r.color.enabled = v; })} onStrength={(s) => p.edit((r) => { r.color.strength = s; })} />
-          <OptionRow id="background" label="Balance background" checked={recipe.background.enabled} strength={recipe.background.strength}
-            hint="Evens out color casts or gradients in empty sky. Needs sky regions you confirm for each image."
+          <OptionRow id="background" label="Manual sky regions" checked={recipe.background.enabled} strength={recipe.background.strength}
+            hint="Optional: correct the background from sky regions you confirm for this image. The automatic background steps already run without it."
             onChecked={(v) => p.edit((r) => { r.background.enabled = v; })} onStrength={(s) => p.edit((r) => { r.background.strength = s; })}>
             {recipe.background.enabled && asset && (
               <BackgroundPanel
@@ -125,10 +127,6 @@ export function EnhancementPanel(p: EnhancementPanelProps) {
               />
             )}
           </OptionRow>
-          <OptionRow id="stars" label="Protect stars" hint="Limits extra brightening of confidently identified stars." checked={recipe.star_protection.enabled} strength={recipe.star_protection.strength}
-            onChecked={(v) => p.edit((r) => { r.star_protection.enabled = v; })} onStrength={(s) => p.edit((r) => { r.star_protection.strength = s; })} />
-          <OptionRow id="local-contrast" label="Local contrast" hint="Gently adds medium-scale contrast to existing structure." checked={recipe.local_contrast.enabled} strength={recipe.local_contrast.strength}
-            onChecked={(v) => p.edit((r) => { r.local_contrast.enabled = v; })} onStrength={(s) => p.edit((r) => { r.local_contrast.strength = s; })} />
           <OptionRow id="labels" label="Preserve labels" checked={recipe.protect_regions}
             hint={hasLabelRegion ? 'Confirmed label areas stay untouched.' : 'Only used once a label region is confirmed for an image.'}
             onChecked={(v) => p.edit((r) => { r.protect_regions = v; })} />

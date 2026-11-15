@@ -1,11 +1,20 @@
-"""The enhancement pipeline: analysis (global statistics, CPU) followed by one contiguous pixel group
-(CPU or GPU, full-frame or tiled), clipping guardrail, protected-region restoration and reporting.
+"""The enhancement pipeline (engine 1.1, one-button Enhance).
 
-Two display paths share the same tail:
-* rendered (JPEG, display-referred TIFF/FITS): background -> denoise -> tone -> star protection ->
-  local contrast -> color/gamut;
-* linear (stacked TIFF/FITS): background -> denoise (the processed-linear array is saved here, before
-  any display-only operation) -> asinh display renderer -> the same tone/star/contrast/color tail.
+1. Analysis (CPU, global, once): masks, low-coverage edges, stars, supervised background model, automatic
+   gradient model, per-channel sky, bounded field-star white balance, PSF and per-scale noise.
+2. Pixel group A (CPU or GPU, tiled): supervised background -> gradient -> neutralization + white balance
+   (linear) -> optional deconvolution -> multiscale denoise. For linear sources the result is the
+   processed-linear array (saved before any display-only operation).
+3. Analysis 2 (CPU): auto-solve the stretch (linear) or the rendered tone curve, and decide the automatic
+   finishing stages (HDR cores, green removal) and per-scale detail noise from the actual display values.
+4. Pixel group B (CPU or GPU, tiled): stretch / tone -> gentler star stretch -> HDR -> pop curve -> manual
+   tone -> multiscale detail -> RGB reconstruction -> green removal -> gamut -> protected saturation, then
+   the clipping guardrail, protected-region restoration and reporting.
+
+Optional AI tools (recipe ``ai``, opt-in, engine 1.2): learned background extraction replaces the polynomial gradient
+model; learned denoising replaces the wavelet denoise (after group A); learned star separation lets group B finish the
+starless image and add the stars back with the brightness the stretch gives them (blended toward the gentler star stretch). Each is skipped with a reason (and the
+classical step runs) when its model is missing or cannot run.
 
 No module here touches HTTP, the database or the UI.
 """
@@ -13,34 +22,49 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 
 from . import background as bgmod
-from . import local_contrast as lcmod
-from .backends import Backend, BackendUnavailable, NumpyBackend, RecoverableBackendError, get_backend
+from . import finishing as fin
+from . import linear_prep as lp
+from .ai import registry as ai_registry
+from .ai.runtime import Runner
+from .ai.tools import AIStepInfo, ai_background, ai_denoise, separate_stars, timed
+from .backends import Backend, BackendUnavailable, RecoverableBackendError, get_backend
 from .backends.base import kernel_radius
-from .color import gamut_fit, luminance, reconstruct_rgb, saturate
-from .denoise import HALO as DENOISE_HALO
-from .denoise import DenoiseParams, denoise, estimate_noise
+from .color import gamut_fit, luminance, reconstruct_rgb
+from .deconv import DEFAULT_ITERATIONS, DeconvParams, deconvolve, estimate_psf_sigma
+from .denoise import DenoiseParams, denoise, denoise_params, estimate_noise, estimate_wavelet_noise
 from .diagnostics import clip_report, merge_clip_counts
 from .imagedata import Cancelled, ImageData, ProcessingError
-from .linear import (
-    BASELINE_K, LinearFrame, derive_frame, derive_normalization, fixed_map, from_normalized, to_normalized,
+from .masks import masked_gaussian, region_summary, regions_mask, validate_regions
+from .recipe import (
+    BACKGROUND_STRENGTH, PIPELINE_VERSION, POP_PER_CONTRAST, RENDERED_BASE_GAIN, SATURATION_PER_COLOR,
+    STRETCH_DECADES_PER_UNIT, Recipe,
 )
-from .local_contrast import DEFAULT_SCALE_PX, LocalContrastParams
-from .masks import masked_gaussian, regions_mask, region_summary, validate_regions
-from .recipe import PIPELINE_VERSION, STRENGTH_TABLES, Recipe
 from .report import dependency_versions
 from .star_protection import StarMask, detect_stars
+from .stretch import (
+    LinearFrame, StretchParams, apply_stretch, derive_frame, derive_normalization, fixed_map, from_normalized, mtf,
+    rendered_sky_balance, solve_stretch, stretch_statistics, to_normalized,
+)
 from .tiling import run_tiled
-from .tone import ManualTone, apply_manual, asinh_map, rational_gain, smoothstep, validate_monotonic
+from .tone import ManualTone, apply_manual, rational_gain, smoothstep, validate_monotonic
 
 CLIP_THRESHOLD_BLACK = 0.001
 CLIP_THRESHOLD_WHITE = 0.001
 STAT_FLOOR = 1e-6
-BYTES_PER_PIXEL_PER_CHANNEL = 80  # conservative live-buffer estimate for the pixel group (temporaries included)
+BYTES_PER_PIXEL_PER_CHANNEL = 96  # conservative live-buffer estimate for a pixel group (wavelet temporaries included)
+HALO_SIGMA = 6.0
+STAR_EXCESS_SCALE = 0.08  # rendered path: display-luminance excess over the star-free surroundings at full protection
+DEFAULT_STAR_STRETCH = 0.5
+DEFAULT_HDR_AMOUNT = 0.5
+DEFAULT_SCNR_AMOUNT = 1.0
+DEFAULT_GRADIENT_DEGREE = 2
+COLD_SIGMAS = 8.0
 
 
 @dataclass
@@ -64,6 +88,7 @@ class ExecutionOptions:
     cancel_check: Callable[[], None] | None = None
     progress: Callable[[str], None] | None = None
     backend_factory: Callable[[str], Backend] | None = None
+    ai_models_dir: Path | None = None
 
 
 @dataclass
@@ -81,44 +106,78 @@ class PipelineResult:
     star_soft: np.ndarray | None = None
 
 
+# ====================================================================================================== params
 @dataclass
-class Params:
+class GroupA:
     mode: str
     channels: int
-    bg_offsets: np.ndarray | None
-    denoise: DenoiseParams | None
-    tone_enabled: bool
-    gain: float
-    k: float
+    bg_offsets: np.ndarray | None = None
+    use_plane: bool = False
+    use_gradient: bool = False
+    sky: np.ndarray | None = None  # per-channel level subtracted by neutralization
+    gains: np.ndarray | None = None  # white-balance gains (linear RGB)
+    pedestal: float = 0.0
+    rendered_offsets: np.ndarray | None = None
+    deconv: DeconvParams | None = None
+    denoise: DenoiseParams | None = None
+
+    @property
+    def needed(self) -> bool:
+        return any(v is not None for v in (self.bg_offsets, self.sky, self.rendered_offsets, self.deconv, self.denoise)) or self.use_gradient or self.use_plane
+
+    @property
+    def halo(self) -> int:
+        h = 0
+        if self.denoise:
+            h = max(h, self.denoise.halo)
+        if self.deconv:
+            h = max(h, self.deconv.halo)
+        return h
+
+
+@dataclass
+class GroupB:
+    mode: str
+    channels: int
     frame: LinearFrame | None
-    eframe: LinearFrame | None
-    manual: ManualTone
-    star_amount: float
-    lc: LocalContrastParams | None
-    saturation: float
+    tone_enabled: bool
+    sp: StretchParams | None = None
+    sp_star: StretchParams | None = None
+    star_amount: float = 0.0  # linear: gentler star stretch blend; rendered: brightening protection
+    rend_gain: float = 1.0
+    rend_m: float | None = None
+    manual: ManualTone = field(default_factory=ManualTone)
+    hdr_amount: float = 0.0
+    pop_a: float = 0.0
+    sky_disp: float = 0.0
+    sky_sd: float = 0.0
+    detail: fin.DetailParams | None = None
+    scnr_amount: float = 0.0
+    saturation: float = 1.0
+    separated: bool = False  # AI star separation: x is the starless image, "full" the image with stars
 
     @property
     def tail_needed(self) -> bool:
         return bool(
-            self.tone_enabled or not self.manual.neutral or self.lc is not None or self.saturation > 1.0
+            self.tone_enabled or not self.manual.neutral or self.detail is not None or self.saturation > 1.0
+            or self.hdr_amount > 0 or self.pop_a > 0 or self.scnr_amount > 0 or self.star_amount > 0
         )
 
     @property
     def halo(self) -> int:
-        h = DENOISE_HALO if self.denoise else 0
-        if self.star_amount > 0:
-            h = max(h, kernel_radius(HALO_SIGMA) + 2)
-        if self.lc:
-            h = max(h, self.lc.halo + kernel_radius(HALO_SIGMA))
+        h = kernel_radius(HALO_SIGMA) + 2
+        if self.detail:
+            h = max(h, self.detail.halo)
+        if self.hdr_amount > 0:
+            h = max(h, fin.halo(0, True))
+        if self.mode == "rendered" and self.star_amount > 0:
+            h = max(h, 2 * kernel_radius(HALO_SIGMA) + 2)
         return h
 
 
-HALO_SIGMA = 6.0
-STAR_EXCESS_SCALE = 0.08  # display-luminance excess over the star-free surroundings at which protection is full
-
-
+# ====================================================================================================== helpers
 def baseline_display(image: ImageData, frame: LinearFrame | None) -> np.ndarray:
-    """Original display values: decoded pixels (rendered) or the frozen asinh mapping (linear)."""
+    """Original display values: decoded pixels (rendered) or the frozen linked autostretch (linear)."""
     if image.domain == "display":
         return image.pixels
     assert frame is not None
@@ -133,30 +192,16 @@ def prepare_linear_frame(image: ImageData, regions: list[dict[str, Any]] | None 
         weight &= ~regions_mask(regions, image.width, image.height)
     offset, scale = derive_normalization(image.pixels, weight)
     u = to_normalized(image.pixels, offset, scale)
-    star = detect_stars(u, weight, STAT_FLOOR) if weight.any() else None
-    return derive_frame(u, weight, star.hard if star and star.reliable else None, offset, scale, BASELINE_K)
-
-
-def _strength(table: str, name: str, override: float | None, reduction: float, neutral: float) -> float:
-    v = STRENGTH_TABLES[table][name] if override is None else override
-    return neutral + (v - neutral) * reduction
-
-
-def _tone_slope_at_sky(image_mode: str, sky: float, gain: float, frame: LinearFrame | None, k: float) -> float:
-    if image_mode == "rendered":
-        return gain / (1.0 + (gain - 1.0) * max(sky, 0.0)) ** 2
-    assert frame is not None
-    s = max(sky - frame.black, 0.0) / frame.span
-    return (k / np.arcsinh(k)) / np.sqrt(1.0 + (k * s) ** 2) / frame.span
+    return derive_frame(u, weight, offset, scale)
 
 
 def estimate_memory_per_pixel(channels: int) -> int:
     return BYTES_PER_PIXEL_PER_CHANNEL * max(1, channels)
 
 
-# Measured peak working-set per channel-pixel for the whole run on the target PC (tools/benchmark.py: 21 MP RGB,
-# 3.6 GB rendered / 7.2 GB linear), rounded up. Used for the up-front memory check, not a promise.
-PEAK_RAM_BYTES_PER_CHANNEL_PIXEL = {"rendered": 60, "linear": 120}
+# Measured peak working-set per channel-pixel for the whole run on the target PC (tools/benchmark.py), rounded up.
+# Used for the up-front memory check, not a promise.
+PEAK_RAM_BYTES_PER_CHANNEL_PIXEL = {"rendered": 80, "linear": 160}
 
 
 def estimate_peak_ram_bytes(height: int, width: int, channels: int, domain: str) -> int:
@@ -174,7 +219,45 @@ class _Timings:
         return out
 
 
-def _group(be: Backend, tile_in: dict[str, np.ndarray], inner: tuple[int, int, int, int], P: Params):
+def _lum_stretch(xp, x):
+    from .stretch import stretch_luminance
+
+    return stretch_luminance(xp, x)
+
+
+# ====================================================================================================== pixel groups
+def _group_a(be: Backend, tile_in: dict[str, np.ndarray], inner: tuple[int, int, int, int], P: GroupA):
+    xp = be.xp
+    iy0, iy1, ix0, ix1 = inner
+    x = be.asarray(tile_in["x"])
+    w = be.asarray(tile_in["w"])
+    star = be.asarray(tile_in["star"])
+    rgb = x.ndim == 3
+    if P.bg_offsets is not None:
+        x = x - xp.asarray(P.bg_offsets)
+    if P.use_plane:
+        pl = be.asarray(tile_in["plane"])
+        x = x - (pl[..., None] if rgb else pl)
+    if P.use_gradient:
+        x = x - be.asarray(tile_in["grad"])
+    if P.sky is not None:
+        x = x - xp.asarray(P.sky)
+        if P.gains is not None:
+            x = x * xp.asarray(P.gains)
+        x = x + P.pedestal
+    if P.rendered_offsets is not None:
+        x = x - xp.asarray(P.rendered_offsets)
+    if P.deconv is not None:
+        x = deconvolve(be, x, w, star, _lum_stretch, P.deconv)
+    if P.denoise is not None:
+        x = denoise(be, x, w, star, P.denoise)
+    sl = (slice(iy0, iy1), slice(ix0, ix1))
+    out = {"proc": be.asnumpy(x[sl]).astype(np.float32, copy=False)}
+    be.synchronize()
+    return out, None
+
+
+def _group_b(be: Backend, tile_in: dict[str, np.ndarray], inner: tuple[int, int, int, int], P: GroupB):
     xp = be.xp
     iy0, iy1, ix0, ix1 = inner
     x = be.asarray(tile_in["x"])
@@ -182,61 +265,78 @@ def _group(be: Backend, tile_in: dict[str, np.ndarray], inner: tuple[int, int, i
     star = be.asarray(tile_in["star"])
     src = be.asarray(tile_in["src"])
     rgb = x.ndim == 3
-
-    if P.bg_offsets is not None:
-        x = x - xp.asarray(P.bg_offsets)
-        if "plane" in tile_in:
-            pl = be.asarray(tile_in["plane"])
-            x = x - (pl[..., None] if rgb else pl)
-    if P.denoise is not None:
-        x = denoise(be, x, w, star, P.denoise)
-    proc = x
+    fixed = None
+    stars_disp = None
 
     if P.mode == "linear":
-        rgb0, L0 = fixed_map(xp, x, P.frame)
+        full = be.asarray(tile_in["full"]) if P.separated else x
+        fixed = fixed_map(xp, full, P.frame)[0]
         if P.tone_enabled:
-            Lx = luminance(xp, x)
-            s = xp.maximum(Lx - P.eframe.black, 0.0) / P.eframe.span
-            t_base = asinh_map(xp, s, P.k)
+            y = apply_stretch(xp, x, P.sp)
+            if P.separated:  # the display brightness the stars add, blended toward the gentler star stretch
+                d = apply_stretch(xp, full, P.sp) - y
+                if P.sp_star is not None and P.star_amount > 0:
+                    d = (1.0 - P.star_amount) * d + P.star_amount * (apply_stretch(xp, full, P.sp_star) - apply_stretch(xp, x, P.sp_star))
+                stars_disp = xp.clip(d, 0.0, 1.0)
+            elif P.sp_star is not None and P.star_amount > 0:
+                y = fin.star_blend(xp, y, apply_stretch(xp, x, P.sp_star), star, P.star_amount)
+        elif P.separated:
+            y = fixed_map(xp, x, P.frame)[0]
+            stars_disp = xp.clip(fixed - y, 0.0, 1.0)
         else:
-            t_base = L0
+            y = fixed
+        rgb0 = y
+        L0 = luminance(xp, y)
+        Lb = L0
     else:
         rgb0 = x
         L0 = luminance(xp, x)
-        t_base = rational_gain(xp, L0, P.gain) if P.tone_enabled else L0
-    Lt = apply_manual(xp, t_base, P.manual)
+        Lb = L0
+        if P.tone_enabled:
+            Lb = rational_gain(xp, L0, P.rend_gain)
+            if P.rend_m is not None:
+                Lb = mtf(xp, P.rend_m, xp.clip(Lb, 0.0, 1.0))
+            if P.star_amount > 0:
+                # Protect only where a compact star is genuinely brighter than its star-free surroundings, so the
+                # sky ring around a star keeps its normal stretch (no dark rings, no abrupt mask edges).
+                delta = Lb - L0
+                w_nostar = w * (1.0 - xp.clip(star * 2.0, 0.0, 1.0))
+                excess = L0 - masked_gaussian(be, L0, w_nostar, HALO_SIGMA)
+                prot = star * smoothstep(xp, excess / STAR_EXCESS_SCALE)
+                Lb = L0 + xp.where(delta > 0, delta * (1.0 - P.star_amount * prot), delta)
 
     if P.tail_needed:
-        delta = Lt - L0
-        if P.star_amount > 0:
-            # Protect only where a compact star is genuinely brighter than its star-free surroundings, so the
-            # sky ring around a star keeps its normal stretch (no dark rings, no abrupt mask edges).
+        Lp = Lb
+        if P.hdr_amount > 0:
             w_nostar = w * (1.0 - xp.clip(star * 2.0, 0.0, 1.0))
-            excess = L0 - masked_gaussian(be, L0, w_nostar, HALO_SIGMA)
-            prot = star * smoothstep(xp, excess / STAR_EXCESS_SCALE)
-            delta = xp.where(delta > 0, delta * (1.0 - P.star_amount * prot), delta)
-        Lp = L0 + delta
-        if P.lc is not None:
-            halo_mask = xp.clip(be.gaussian(star, HALO_SIGMA) * 2.0, 0.0, 1.0)
-            Lp = Lp + lcmod.local_contrast_boost(be, Lp, w, halo_mask, P.lc)
+            Lp = fin.hdr_compress(be, Lp, w_nostar, P.hdr_amount)
+        if P.pop_a > 0:
+            Lp = fin.pop_curve(xp, Lp, P.sky_disp, P.pop_a)
+        Lp = apply_manual(xp, Lp, P.manual)
+        if P.detail is not None:
+            Lp = Lp + fin.detail_boost(be, Lp, w, fin.star_halo_mask(be, star), P.detail)
         y = reconstruct_rgb(xp, rgb0, L0, Lp)
         if rgb:
+            if P.scnr_amount > 0:
+                y = fin.scnr(xp, y, P.scnr_amount)
             y = gamut_fit(xp, y)
-            y = saturate(xp, y, P.saturation)
+            y = fin.protected_saturate(xp, y, P.saturation, P.sky_disp, P.sky_sd)
     else:
         y = rgb0
+    if stars_disp is not None:  # stars added back over the finished starless image
+        y = xp.clip(y + stars_disp, 0.0, 1.0)
 
     sl = (slice(iy0, iy1), slice(ix0, ix1))
     eligible = w[sl] > 0
     counts = clip_report(src[sl], y[sl], eligible, xp=xp)
     out: dict[str, np.ndarray] = {"y": be.asnumpy(xp.clip(y[sl], 0.0, 1.0)).astype(np.float32, copy=False)}
-    if P.mode == "linear":
-        out["proc"] = be.asnumpy(proc[sl]).astype(np.float32, copy=False)
-        out["fixed"] = be.asnumpy(xp.clip(rgb0[sl], 0.0, 1.0)).astype(np.float32, copy=False)
+    if fixed is not None:
+        out["fixed"] = be.asnumpy(xp.clip(fixed[sl], 0.0, 1.0)).astype(np.float32, copy=False)
     be.synchronize()
     return out, counts
 
 
+# ====================================================================================================== main
 def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: ExecutionOptions | None = None) -> PipelineResult:
     opts = opts or ExecutionOptions()
     check = opts.cancel_check or (lambda: None)
@@ -250,10 +350,11 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
     t_start = time.perf_counter()
     h, w = image.height, image.width
     channels = image.channels
+    rgb = channels == 3
     mode = "linear" if image.domain == "linear" else "rendered"
-    adv = recipe.advanced
-    ops: list[dict[str, Any]] = []
+    look, auto, adv = recipe.look, recipe.auto, recipe.advanced
     notes: list[str] = list(image.notes)
+    decisions: dict[str, Any] = {}
 
     # ---------------------------------------------------------------- masks
     progress("Measuring image")
@@ -266,11 +367,9 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
     # ---------------------------------------------------------------- work array and baseline
     frame: LinearFrame | None = None
     if mode == "linear":
-        frame = LinearFrame.from_dict(ctx.frame) if ctx.frame else None
+        frame = LinearFrame.from_dict(ctx.frame)
         if frame is None:
-            offset, scale = derive_normalization(image.pixels, weight)
-            u0 = to_normalized(image.pixels, offset, scale)
-            frame = derive_frame(u0, weight, None, offset, scale, BASELINE_K)
+            frame = prepare_linear_frame(image)
         work = to_normalized(image.pixels, frame.offset, frame.scale)
     else:
         work = image.pixels.astype(np.float32, copy=False)
@@ -279,28 +378,37 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
     manual = ManualTone(recipe.tone.brightness_ev, recipe.tone.shadows, recipe.tone.highlights, recipe.tone.black_point)
     validate_monotonic(manual)
     tone_stage = recipe.tone.enabled or not manual.neutral
+    color_ops = rgb and (look.color > 0 or auto.green_removal or (auto.white_balance and mode == "linear"))
     is_noop = not (
-        recipe.denoise.enabled or tone_stage or recipe.local_contrast.enabled
-        or (recipe.color.enabled and channels == 3) or recipe.background.enabled
+        tone_stage or look.noise > 0 or look.contrast > 0 or look.detail > 0 or color_ops or recipe.background.enabled
+        or auto.neutralize or (auto.gradient and mode == "linear") or adv.deconvolution
+        or (look.protect_cores and recipe.tone.enabled) or recipe.ai.background or recipe.ai.denoise or recipe.ai.stars
     )
 
     # ---------------------------------------------------------------- analysis (CPU, global, once)
+    edges = np.zeros((h, w), bool)
+    edge_info: dict[str, Any] = {"fraction": 0.0, "method": "not measured"}
+    if mode == "linear" and not is_noop:
+        edges, edge_info = timings.run("edge mask", "cpu", lambda: lp.edge_mask(work, weight))
+    stat_w = weight & ~edges
+    if not stat_w.any():
+        stat_w = weight
+
     star: StarMask | None = None
-    need_star = (recipe.denoise.enabled or recipe.local_contrast.enabled or (recipe.star_protection.enabled and tone_stage)) and not is_noop
+    need_star = not is_noop and (look.noise > 0 or look.detail > 0 or auto.star_stretch or auto.white_balance or adv.deconvolution or auto.gradient)
     if need_star:
         progress("Finding stars")
-        star = timings.run("star detection", "cpu", lambda: detect_stars(work, weight, STAT_FLOOR), note="global connected components")
+        star = timings.run("star detection", "cpu", lambda: detect_stars(work, stat_w, STAT_FLOOR), note="global connected components")
     star_hard = star.hard if star and star.reliable else None
     star_soft = star.soft if star and star.reliable else None
 
-    noise: dict[str, float] = {}
-    if recipe.denoise.enabled:
-        progress("Measuring noise")
-        noise = timings.run("noise estimate", "cpu", lambda: estimate_noise(work, weight, star_hard, STAT_FLOOR))
+    noise_report: dict[str, float] = {}
+    if not is_noop:
+        noise_report = timings.run("noise estimate", "cpu", lambda: estimate_noise(work, stat_w, star_hard, STAT_FLOOR))
 
-    # background model (supervised)
+    # supervised background model
     bg_model: bgmod.BgModel | None = None
-    bg_status = {"name": "background", "requested": recipe.background.enabled}
+    bg_status: dict[str, Any] = {"name": "background", "requested": recipe.background.enabled}
     if recipe.background.enabled:
         progress("Checking background samples")
         conf = ctx.background
@@ -309,7 +417,7 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
         elif conf.get("method") != recipe.background.method:
             bg_status.update(status="skipped", reason=f"Confirmed sky regions are for the '{conf.get('method')}' model, not '{recipe.background.method}'; confirm the new model first.")
         else:
-            sigma_pix = noise.get("sigma_white_equivalent") or estimate_noise(work, weight, star_hard, STAT_FLOOR)["sigma_white_equivalent"]
+            sigma_pix = noise_report.get("sigma_white_equivalent") or estimate_noise(work, weight, star_hard, STAT_FLOOR)["sigma_white_equivalent"]
             model = timings.run(
                 "background model", "cpu",
                 lambda: bgmod.build_model(work, weight, star_hard, conf["samples"], recipe.background.method, sigma_pix, protected),
@@ -319,61 +427,312 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
                 bg_status.update(status="skipped", reason=f"The confirmed sky regions did not validate on this run: {msgs}")
             else:
                 bg_model = model
-    if not recipe.background.enabled:
-        bg_status.update(status="off", reason=None)
+    bg_strength = (BACKGROUND_STRENGTH[recipe.background.strength] if adv.background_strength is None else adv.background_strength)
 
-    bg_plane_full: np.ndarray | None = None
-    bg_strength_base = _strength("background", recipe.background.strength, adv.background_strength, 1.0, 0.0)
+    A = GroupA(mode=mode, channels=channels)
+    base = work
+    if bg_model is not None:
+        A.bg_offsets = bgmod.channel_offset_vector(bg_model, bg_strength)
+        base = work - A.bg_offsets
+        pm = bgmod.plane_map(bg_model, h, w) if bg_model.method == "planar" else None
+        if pm is not None:
+            A.use_plane = True
+            plane = (pm * bg_strength).astype(np.float32)
+            base = base - (plane[..., None] if rgb else plane)
 
-    # enhanced linear frame: derived from the background-corrected data (before denoise)
-    def bg_corrected_for_frame(strength: float) -> np.ndarray:
-        if bg_model is None:
-            return work
-        off = bgmod.channel_offset_vector(bg_model, strength)
-        out = work - off
-        pm = bgmod.plane_map(bg_model, h, w)
-        if pm is not None and bg_model.method == "planar":
-            out = out - (pm * strength)[..., None] if out.ndim == 3 else out - pm * strength
-        return out
+    # optional AI background extraction (replaces the polynomial gradient model)
+    ai: dict[str, dict[str, Any]] = {}
+    grad_map: np.ndarray | None = None
+    if recipe.ai.background and not is_noop:
+        if mode != "linear":
+            ai["ai_background"] = {"status": "inactive", "reason": "AI background extraction runs on linear stacks only; this image is already processed."}
+        elif bg_model is not None:
+            ai["ai_background"] = {"status": "skipped", "reason": "A confirmed manual background correction is used for this image."}
+        else:
+            res = _run_ai(opts, "background", rgb, progress, "Removing background (AI)", lambda run: ai_background(base, stat_w, run))
+            if res["status"] == "applied":
+                grad_map = res.pop("result")
+                base = base - grad_map
+                A.use_gradient = True
+            ai["ai_background"] = res
+    ai_bg_applied = (ai.get("ai_background") or {}).get("status") == "applied"
 
-    # ---------------------------------------------------------------- guardrail loop
+    # automatic gradient (linear)
+    grad_model: lp.GradientModel | None = None
+    grad_status: dict[str, Any] = {"status": "off", "reason": None}
+    if ai_bg_applied:
+        grad_status = {"status": "inactive", "reason": "Replaced by AI background extraction."}
+    elif mode == "linear" and auto.gradient and not is_noop:
+        if bg_model is not None:
+            grad_status = {"status": "skipped", "reason": "A confirmed manual background correction is used for this image."}
+        else:
+            progress("Modelling gradients")
+            pre_sky = lp.sky_stats(base, stat_w)
+            sig_pix = float(np.mean(pre_sky.sigma))
+            grad_model = timings.run(
+                "gradient model", "cpu",
+                lambda: lp.fit_gradient(base, stat_w, star_hard, adv.gradient_degree or DEFAULT_GRADIENT_DEGREE, sig_pix),
+            )
+            if grad_model.ok:
+                grad_map = lp.gradient_map(grad_model, h, w)
+                base = base - grad_map
+                A.use_gradient = True
+                grad_status = {"status": "applied", "reason": None}
+            else:
+                grad_status = {"status": "skipped", "reason": grad_model.reason}
+    elif auto.gradient and mode == "rendered" and not is_noop:
+        grad_status = {"status": "inactive", "reason": "Automatic gradient removal runs on linear stacks only; this image is already processed."}
+
+    # neutralization and white balance
+    sky = lp.sky_stats(base, stat_w) if not is_noop else None
+    neutral_status: dict[str, Any] = {"status": "off", "reason": None}
+    wb = lp.WhiteBalance(False, reason=None)
+    wb_status: dict[str, Any] = {"status": "off", "reason": None}
+    prepped = base
+    if auto.neutralize and sky is not None:
+        if mode == "linear":
+            A.sky = np.array(sky.level, dtype=np.float32)
+            A.pedestal = float(lp.PEDESTAL_SIGMAS * max(sky.sigma))
+            neutral_status = {"status": "applied", "reason": None}
+            if rgb and auto.white_balance:
+                progress("Balancing color")
+                saturated = (work >= lp.SATURATION_LEVEL).any(axis=2)
+                sig_l = float(np.mean(sky.sigma)) / np.sqrt(3.0)
+                wb = timings.run(
+                    "white balance", "cpu",
+                    lambda: lp.star_white_balance(base - A.sky, star_hard, saturated, sig_l, adv.white_balance_limit or lp.WB_DEFAULT_LIMIT),
+                )
+                if wb.ok:
+                    A.gains = np.array(wb.factors, dtype=np.float32)
+                    wb_status = {"status": "applied", "reason": None}
+                else:
+                    wb_status = {"status": "skipped", "reason": wb.reason}
+            prepped = (base - A.sky) * (A.gains if A.gains is not None else 1.0) + A.pedestal
+        elif rgb:
+            mean_sky = float(np.mean(sky.level))
+            A.rendered_offsets = np.array([lv - mean_sky for lv in sky.level], dtype=np.float32)
+            prepped = base - A.rendered_offsets
+            neutral_status = {"status": "applied", "reason": None}
+        else:
+            neutral_status = {"status": "skipped", "reason": "Monochrome image: there is no color cast to neutralize."}
+    if rgb and auto.white_balance and mode == "linear" and wb_status["status"] == "off" and not is_noop:
+        wb_status = {"status": "skipped", "reason": "White balance needs background neutralization, which is switched off." if not auto.neutralize else "Monochrome image."}
+    elif rgb and auto.white_balance and mode == "rendered" and not is_noop:
+        wb_status = {"status": "inactive", "reason": "Star-based white balance runs on linear stacks only; this image is already processed."}
+
+    # deconvolution (opt-in)
+    protect_a: np.ndarray | None = None
+    deconv_status: dict[str, Any] = {"status": "off", "reason": None}
+    if adv.deconvolution:
+        if mode != "linear":
+            deconv_status = {"status": "skipped", "reason": "Deconvolution runs on linear stacks only."}
+        else:
+            Lp_ = _lum_stretch(np, prepped)
+            saturated = (work >= lp.SATURATION_LEVEL).any(axis=2) if rgb else work >= lp.SATURATION_LEVEL
+            sig_psf, n_psf = estimate_psf_sigma(Lp_, star_hard, saturated)
+            if sig_psf is None:
+                deconv_status = {"status": "skipped", "reason": f"Not enough isolated, unsaturated stars to measure the blur ({n_psf} found)."}
+            else:
+                sky_l, sig_l = lp.clipped_stats(Lp_[stat_w])
+                A.deconv = DeconvParams(sig_psf, adv.deconvolution_iterations or DEFAULT_ITERATIONS, sky_l, max(sig_l, STAT_FLOOR), n_psf)
+                deconv_status = {"status": "applied", "reason": None}
+
+    # multiscale denoise
+    if look.noise > 0:
+        progress("Measuring noise")
+        n_lum = adv.denoise_scales or 4
+        wn = timings.run("wavelet noise", "cpu", lambda: estimate_wavelet_noise(prepped, stat_w, star_hard, n_lum, min(6, n_lum + 1), STAT_FLOOR))
+        A.denoise = denoise_params(look.noise, n_lum, wn)
+        # Isolated dark defects (cold pixels, stacking holes) are left alone like stars: shrinking the small
+        # coefficients around them would spread them into dark blobs.
+        Lw = luminance(np, prepped)
+        sky_l, sig_l = lp.clipped_stats(Lw[stat_w])
+        cold = (Lw < sky_l - COLD_SIGMAS * max(sig_l, STAT_FLOOR)) & weight
+        if cold.any():
+            from scipy import ndimage as _nd
+
+            cold_soft = _nd.binary_dilation(cold, iterations=2).astype(np.float32)
+            protect_a = cold_soft if star_soft is None else np.maximum(star_soft, cold_soft)
+            decisions["denoise_defects_protected_px"] = int(cold.sum())
+
+    classical_dn: DenoiseParams | None = None
+    if recipe.ai.denoise and not is_noop:
+        if look.noise <= 0:
+            ai["ai_denoise"] = {"status": "skipped", "reason": "Noise reduction is set to 0, so there is nothing for the AI to remove."}
+        else:
+            spec, path, reason = _ai_model(opts, "denoise", rgb)
+            if path is None:
+                ai["ai_denoise"] = {"status": "skipped", "reason": reason}
+            else:
+                classical_dn, A.denoise = A.denoise, None  # kept as the fallback if the model cannot run
+                ai["ai_denoise"] = {"status": "pending"}
+
+    # ---------------------------------------------------------------- pixel group A
     backend_name, backend_reason = choose_backend(opts, h, w, channels)
-    band_sigma_cache: dict[float, float] = {}
+    gpu_disabled = opts.gpu_disabled
+    exec_info: dict[str, Any] = {}
+    zeros = np.zeros((h, w), dtype=np.float32)
+    star_in = star_soft if star_soft is not None else zeros
+    if A.needed:
+        progress("Cleaning linear data" if mode == "linear" else "Reducing noise")
+        exec_a = {"x": work, "w": weight.astype(np.float32), "star": protect_a if protect_a is not None else star_in}
+        if A.use_plane:
+            exec_a["plane"] = (bgmod.plane_map(bg_model, h, w) * bg_strength).astype(np.float32)
+        if A.use_gradient:
+            exec_a["grad"] = grad_map
+        out_a, _, backend_name, exec_info, gpu_disabled = _execute(
+            lambda be, t, inner: _group_a(be, t, inner, A), exec_a, ["proc"], A.halo, h, w, channels, opts, backend_name, gpu_disabled,
+            timings, check, "pixel group A",
+        )
+        proc = out_a["proc"]
+    else:
+        proc = work.astype(np.float32, copy=False)
+    del grad_map
+    proc_changed = A.needed
+
+    # ---------------------------------------------------------------- optional AI denoise and star separation
+    sig_before_ai: float | None = None
+    if (ai.get("ai_denoise") or {}).get("status") == "pending":
+        if mode == "linear" and recipe.tone.enabled:
+            sig_before_ai = stretch_statistics(proc, stat_w, star_hard)[1]
+        res = _run_ai(opts, "denoise", rgb, progress, "Reducing noise (AI)", lambda run: ai_denoise(proc, weight, look.noise, run, check, _percent(progress, "Reducing noise (AI)")))
+        if res["status"] == "applied":
+            proc = res.pop("result")
+            proc_changed = True
+        elif classical_dn is not None:  # the model could not run: classical wavelet denoise instead
+            A2 = GroupA(mode=mode, channels=channels, denoise=classical_dn)
+            out_a2, _, backend_name, info_a2, gpu_disabled = _execute(
+                lambda be, t, inner: _group_a(be, t, inner, A2), {"x": proc, "w": weight.astype(np.float32), "star": protect_a if protect_a is not None else star_in},
+                ["proc"], A2.halo, h, w, channels, opts, backend_name, gpu_disabled, timings, check, "denoise (fallback)",
+            )
+            exec_info = _merge_exec(exec_info, info_a2)
+            proc, A.denoise, proc_changed = out_a2["proc"], classical_dn, True
+        ai["ai_denoise"] = res
+    disp_src = proc
+    if recipe.ai.stars and not is_noop:
+        if mode != "linear":
+            ai["ai_stars"] = {"status": "inactive", "reason": "AI star separation runs on linear stacks only; this image is already processed."}
+        else:
+            def _sep(run):
+                t = run.input_shape[2]
+                starless, _stars, params = separate_stars(proc, weight, run, t if isinstance(t, int) else 256, check, _percent(progress, "Separating stars (AI)"))
+                return starless, params
+
+            res = _run_ai(opts, "stars", rgb, progress, "Separating stars (AI)", _sep, nchw=True)
+            if res["status"] == "applied":
+                disp_src = res.pop("result")
+            ai["ai_stars"] = res
+    stars_sep = disp_src is not proc
+
+    # ---------------------------------------------------------------- analysis 2: display decisions (CPU)
+    progress("Choosing the stretch")
+    sp: StretchParams | None = None
+    B = GroupB(mode=mode, channels=channels, frame=frame, tone_enabled=recipe.tone.enabled, manual=manual)
+    y0: np.ndarray
+    if mode == "linear":
+        if recipe.tone.enabled:
+            sky_l, sig_l, hi_l = stretch_statistics(disp_src, stat_w, star_hard)
+            if sig_before_ai is not None and (ai.get("ai_denoise") or {}).get("status") == "applied":
+                # AI denoising flattens the sky far more than its true noise drops; the stretch solver would read that as
+                # "almost no noise" and stretch until residual mottle and color are amplified. The stretch therefore
+                # treats AI-denoised data as at most AI_STRETCH_NOISE_RATIO cleaner than before (about what full-strength
+                # wavelet denoise measures): the result is cleaner at a comparable stretch.
+                sig_floor = AI_STRETCH_NOISE_RATIO * sig_before_ai
+                decisions["stretch_noise_floor"] = {"measured_sigma": sig_l, "sigma_before_ai_denoise": sig_before_ai, "ratio": AI_STRETCH_NOISE_RATIO,
+                                                    "used": max(sig_l, sig_floor)}
+                sig_l = max(sig_l, sig_floor)
+            white = _white_level(proc, A, rgb)
+            sp = solve_stretch(
+                sky_l, sig_l, hi_l, white, look.background, protect_cores=look.protect_cores, amount=look.stretch,
+                log_d=adv.stretch_log_d, b=adv.stretch_b, p=adv.highlight_convergence, decades_per_unit=STRETCH_DECADES_PER_UNIT,
+            )
+            B.sp = sp
+            y0 = timings.run("display preview", "cpu", lambda: apply_stretch(np, disp_src, sp))
+            B.sky_disp, B.sky_sd = sp.target, sp.sky_display_sigma
+            if auto.star_stretch and star_soft is not None:
+                B.sp_star = sp.gentler()
+                B.star_amount = adv.star_stretch_amount if adv.star_stretch_amount is not None else DEFAULT_STAR_STRETCH
+            if stars_sep:
+                B.separated = True
+                B.sp_star = sp.gentler() if auto.star_stretch else None
+                B.star_amount = (adv.star_stretch_amount if adv.star_stretch_amount is not None else DEFAULT_STAR_STRETCH) if auto.star_stretch else 0.0
+        else:
+            B.separated = stars_sep
+            y0 = fixed_map(np, disp_src, frame)[0]
+            Ys = luminance(np, y0)
+            B.sky_disp, B.sky_sd = lp.clipped_stats(Ys[stat_w])
+    else:
+        L0 = luminance(np, proc)
+        Lb = L0
+        if recipe.tone.enabled:
+            B.rend_gain = adv.tone_gain if adv.tone_gain is not None else RENDERED_BASE_GAIN * float(2.0 ** (0.5 * look.stretch))
+            Lg = rational_gain(np, L0, B.rend_gain)
+            sky_g, _ = lp.clipped_stats(Lg[stat_w])
+            B.rend_m, goal = rendered_sky_balance(sky_g, look.background)
+            decisions["rendered_tone"] = {"gain": B.rend_gain, "sky_after_gain": sky_g, "sky_goal": goal, "mtf_m": B.rend_m,
+                                          "note": "sky goal limited to 0.6x..1.6x of the rendered sky"}
+            Lb = mtf(np, B.rend_m, np.clip(Lg, 0.0, 1.0))
+            if auto.star_stretch and star_soft is not None:
+                B.star_amount = adv.star_stretch_amount if adv.star_stretch_amount is not None else DEFAULT_STAR_STRETCH
+        y0 = reconstruct_rgb(np, proc, L0, Lb) if rgb else Lb
+        B.sky_disp, B.sky_sd = lp.clipped_stats(luminance(np, y0)[stat_w])
+    Y0 = luminance(np, y0)
+    use_ns = stat_w & ~star_hard if star_hard is not None else stat_w
+
+    hdr_status: dict[str, Any] = {"status": "off", "reason": None}
+    if look.protect_cores and recipe.tone.enabled:
+        found, info = fin.detect_bright_core(Y0, use_ns)
+        decisions["bright_core"] = info
+        if found:
+            B.hdr_amount = adv.hdr_amount if adv.hdr_amount is not None else DEFAULT_HDR_AMOUNT
+            hdr_status = {"status": "applied", "reason": None}
+        else:
+            hdr_status = {"status": "skipped", "reason": "No bright extended core was found, so core compression is not needed."}
+    scnr_status: dict[str, Any] = {"status": "off", "reason": None}
+    if rgb and auto.green_removal and not is_noop:
+        excess = fin.green_excess(y0, use_ns, B.sky_disp, B.sky_sd)
+        decisions["green_excess"] = excess
+        if excess > fin.SCNR_DETECT_EXCESS:
+            B.scnr_amount = adv.scnr_amount if adv.scnr_amount is not None else DEFAULT_SCNR_AMOUNT
+            scnr_status = {"status": "applied", "reason": None}
+        else:
+            scnr_status = {"status": "skipped", "reason": f"No green cast remained after color balance (excess {excess:.4f})."}
+    if look.detail > 0:
+        n_d = fin.scales_for(adv.detail_scale_px)
+        dn = timings.run("detail noise", "cpu", lambda: estimate_wavelet_noise(Y0, stat_w, star_hard, n_d, n_d, STAT_FLOOR))
+        B.detail = fin.DetailParams(look.detail, n_d, dn.lum)
+    B.pop_a = POP_PER_CONTRAST * look.contrast
+    B.saturation = 1.0 + SATURATION_PER_COLOR * look.color if rgb else 1.0
+    del y0, Y0
+
+    # ---------------------------------------------------------------- pixel group B with clipping guardrail
     reduction = 1.0
     attempt = 0
     first_counts = None
     guard_action = "none"
     needs_review = False
-    gpu_disabled = opts.gpu_disabled
-    exec_info: dict[str, Any] = {}
-    outputs: dict[str, np.ndarray] = {}
-    counts: dict[str, Any] = {}
-    P: Params | None = None
+    base_vals = {"pop_a": B.pop_a, "saturation": B.saturation, "hdr": B.hdr_amount, "detail": B.detail, "gain": B.rend_gain}
     while True:
         attempt += 1
-        P = _resolve_params(
-            recipe, mode, channels, work, weight, star_hard, noise, frame, bg_model, bg_corrected_for_frame, bg_strength_base,
-            manual, tone_stage, star, band_sigma_cache, reduction, regions_ok=True,
-        )
-        plane = None
-        if bg_model is not None and bg_model.method == "planar":
-            pm = bgmod.plane_map(bg_model, h, w)
-            plane = (pm * (bg_strength_base * reduction)) if pm is not None else None
+        B.pop_a = base_vals["pop_a"] * reduction
+        B.saturation = 1.0 + (base_vals["saturation"] - 1.0) * reduction
+        B.hdr_amount = base_vals["hdr"] * reduction
+        B.rend_gain = 1.0 + (base_vals["gain"] - 1.0) * reduction
+        if base_vals["detail"] is not None:
+            d0 = base_vals["detail"]
+            B.detail = fin.DetailParams(d0.amount * reduction, d0.n_scales, d0.sigmas)
         progress("Enhancing")
-        exec_in = {
-            "x": work,
-            "w": weight.astype(np.float32),
-            "star": star_soft if star_soft is not None else np.zeros((h, w), dtype=np.float32),
-            "src": baseline,
-        }
-        if plane is not None:
-            exec_in["plane"] = plane
-        outputs, counts, backend_name, exec_info, gpu_disabled = _execute(
-            P, exec_in, h, w, channels, mode, opts, backend_name, gpu_disabled, timings, check
+        exec_b = {"x": disp_src, "w": weight.astype(np.float32), "star": star_in, "src": baseline}
+        if B.separated:
+            exec_b["full"] = proc
+        keys = ["y", "fixed"] if mode == "linear" else ["y"]
+        outputs, counts, backend_name, info_b, gpu_disabled = _execute(
+            lambda be, t, inner: _group_b(be, t, inner, B), exec_b, keys, B.halo, h, w, channels, opts, backend_name, gpu_disabled,
+            timings, check, "pixel group B",
         )
+        exec_info = _merge_exec(exec_info, info_b)
         if first_counts is None:
             first_counts = counts
-        exec_info["backend_reason"] = backend_reason
         black_bad = counts["new_black_fraction"] > CLIP_THRESHOLD_BLACK
         white_bad = counts["new_white_fraction"] > CLIP_THRESHOLD_WHITE
         if (black_bad or white_bad) and attempt == 1 and not is_noop:
@@ -385,6 +744,7 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
             guard_action = "needs_review"
             needs_review = True
         break
+    exec_info["backend_reason"] = backend_reason
 
     # ---------------------------------------------------------------- restore protected/invalid, finalize
     progress("Finalizing")
@@ -402,19 +762,19 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
             display_fixed[prot] = baseline[prot]
         if invalid.any():
             display_fixed[invalid] = 0.0
-        linear_ops = bg_model is not None or P.denoise is not None
-        if linear_ops:
-            export_dtype = image.pixels.dtype
-            processed = from_normalized(outputs["proc"], frame.offset, frame.scale, export_dtype)
+        if proc_changed:
+            processed = from_normalized(proc, frame.offset, frame.scale, image.pixels.dtype)
             if prot.any():
                 processed[prot] = image.pixels[prot]
         else:
             processed = image.pixels
 
     # ---------------------------------------------------------------- report
-    ops.extend(_operation_report(recipe, image, P, bg_status, bg_model, star, tone_stage, manual, channels, mode, backend_name, reduction, is_noop, regions))
+    ctx_r = _ReportCtx(recipe, image, mode, rgb, A, B, sp, star, bg_status, bg_model, bg_strength, grad_status, grad_model, neutral_status,
+                       sky, wb, wb_status, deconv_status, hdr_status, scnr_status, reduction, is_noop, regions, backend_name, tone_stage, ai)
+    learned = [k for k, v in ai.items() if v.get("status") == "applied"]
+    ops = _operation_report(ctx_r)
     summary = _summary_note(ops)
-    final_counts = counts
     report = {
         "engine_version": PIPELINE_VERSION,
         "mode": mode,
@@ -433,21 +793,30 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
             "domain": image.domain,
             "normalization": image.normalization.to_dict() if mode == "rendered" else {
                 "kind": "linear_shared", "scale": frame.scale, "offset": frame.offset,
-                "note": "one shared scale/offset for all channels; reversible; applied only for processing",
+                "note": "one shared scale/offset for all channels (scale = data maximum, the display white point); reversible",
             },
             "invalid_pixels": int(invalid.sum()),
             "metadata": image.metadata,
         },
         "protected_regions": region_summary(regions, w, h),
         "baseline_frame": frame.to_dict() if frame else None,
-        "enhanced_frame": P.eframe.to_dict() if (P.eframe and P.tone_enabled) else None,
+        "enhanced_frame": sp.to_dict() if sp else None,
+        "linear_preparation": {
+            "edges": edge_info,
+            "sky": sky.to_dict() if sky else None,
+            "pedestal": A.pedestal if A.sky is not None else None,
+            "gradient": grad_model.to_dict() if grad_model else None,
+            "white_balance": wb.to_dict() if (mode == "linear" and rgb and auto.white_balance and not is_noop) else None,
+        } if mode == "linear" else None,
+        "decisions": decisions,
         "clipping": {
             "thresholds": {"new_black_fraction": CLIP_THRESHOLD_BLACK, "new_white_fraction": CLIP_THRESHOLD_WHITE},
             "guard_action": guard_action,
             "first_pass": first_counts,
-            "final": final_counts,
-            "note": "New clipping is counted from per-pixel transitions; invalid and protected pixels are excluded. "
-            "Negative physical FITS values are not clipping and are retained in the processed-linear array.",
+            "final": counts,
+            "note": "New clipping is counted from per-pixel transitions against the original display; invalid and protected pixels are "
+            "excluded, so values already black or saturated in the original are not new. Negative physical FITS values are not "
+            "clipping and are retained in the processed-linear array.",
             "negative_values_source": int((image.pixels[image.valid_mask] < 0).sum()) if mode == "linear" else 0,
         },
         "execution": exec_info,
@@ -455,15 +824,21 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
         "total_seconds": round(time.perf_counter() - t_start, 4),
         "dependencies": dependency_versions(),
         "noise_estimate": {
-            **noise,
+            **noise_report,
             "limitations": "Robust MAD of Gaussian high-pass residuals over valid, unprotected, non-star pixels. "
             "Stacking/resampling correlate noise, so this is approximate and not a calibrated signal-to-noise measurement.",
-        } if noise else None,
+        } if noise_report else None,
+        "learned_processing": learned,
         "scientific_disclosure": (
-            "This is display enhancement, not scientific calibration. Background neutralization is not photometric "
-            "color calibration, and a sharper appearance is not additional measured resolution. No pixels were generated."
+            "This is display enhancement, not scientific calibration. Background neutralization and star-based white balance are not "
+            "photometric color calibration, and a sharper appearance is not additional measured resolution. "
+            + (f"Learned (AI) processing was used ({', '.join(AI_LABELS[k] for k in learned)}): those values were predicted by trained "
+               "neural networks from this image's own pixels (no prompts, no reference images); see each operation for the model file."
+               if learned else "No pixels were generated.")
         ),
     }
+    if notes:
+        report["notes"] = notes
     return PipelineResult(
         display=display, baseline=baseline, display_fixed=display_fixed, processed=processed,
         valid_mask=image.valid_mask, protected_mask=protected, report=report, summary=summary,
@@ -471,52 +846,26 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
     )
 
 
-# ======================================================================================================
-def _resolve_params(
-    recipe, mode, channels, work, weight, star_hard, noise, frame, bg_model, bg_corrected_for_frame, bg_strength_base,
-    manual, tone_stage, star, band_cache, reduction, regions_ok,
-) -> Params:
-    adv = recipe.advanced
-    bg_offsets = None
-    if bg_model is not None:
-        strength = bg_strength_base * reduction
-        bg_offsets = bgmod.channel_offset_vector(bg_model, strength)
-    dn = None
-    if recipe.denoise.enabled:
-        amount = _strength("denoise", recipe.denoise.strength, adv.denoise_amount, 1.0, 0.0)
-        dn = DenoiseParams(amount, noise["sigma_residual"], noise["sigma_chroma_residual"] or noise["sigma_residual"])
-    gain = 1.0
-    k = BASELINE_K
-    eframe = None
-    if recipe.tone.enabled:
-        if mode == "rendered":
-            gain = _strength("gain", recipe.tone.strength, adv.tone_gain, reduction, 1.0)
-        else:
-            k = max(BASELINE_K, _strength("asinh_k", recipe.tone.strength, adv.asinh_k, reduction, BASELINE_K))
-            wk = bg_corrected_for_frame(bg_strength_base * reduction)
-            eframe = derive_frame(wk, weight, star_hard, frame.offset, frame.scale, k)
-    star_amount = 0.0
-    if recipe.star_protection.enabled and tone_stage and star is not None and star.reliable:
-        star_amount = _strength("star_protection", recipe.star_protection.strength, adv.star_protection_amount, 1.0, 0.0)
-    lc = None
-    if recipe.local_contrast.enabled:
-        scale_px = adv.local_contrast_scale_px or DEFAULT_SCALE_PX
-        key = float(scale_px)
-        if key not in band_cache:
-            Lw = luminance(np, work)
-            raw = lcmod.estimate_band_sigma(Lw, weight, star_hard, scale_px, STAT_FLOOR)
-            sky = float(np.median(Lw[weight]))
-            slope = _tone_slope_at_sky(mode, sky, gain if recipe.tone.enabled else 1.0, frame if mode == "linear" else None, k if recipe.tone.enabled else BASELINE_K)
-            band_cache[key] = max(raw * abs(slope), STAT_FLOOR)
-        amount = _strength("local_contrast", recipe.local_contrast.strength, adv.local_contrast_amount, reduction, 0.0)
-        lc = LocalContrastParams(amount, scale_px, band_cache[key])
-    sat = 1.0
-    if recipe.color.enabled and channels == 3:
-        sat = _strength("saturation", recipe.color.strength, adv.saturation, reduction, 1.0)
-    return Params(
-        mode=mode, channels=channels, bg_offsets=bg_offsets, denoise=dn, tone_enabled=recipe.tone.enabled, gain=gain, k=k,
-        frame=frame, eframe=eframe, manual=manual, star_amount=star_amount, lc=lc, saturation=sat,
-    )
+def _white_level(proc: np.ndarray, A: GroupA, rgb: bool) -> float:
+    """Display white point: the processed value of the data's saturation level (normalized 1.0)."""
+    if A.sky is not None:
+        gains = A.gains if A.gains is not None else np.ones(len(A.sky), np.float32)
+        return float(np.max((1.0 - A.sky) * gains) + A.pedestal)
+    return float(max(np.max(proc), 1e-6)) if proc.size else 1.0
+
+
+def _merge_exec(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
+    if not a:
+        return b
+    out = dict(b)
+    out["fallbacks"] = a.get("fallbacks", []) + b.get("fallbacks", [])
+    out["notes"] = (a.get("notes") or []) + (b.get("notes") or [])
+    ta, tb = a.get("transfers") or {}, b.get("transfers") or {}
+    out["transfers"] = {k: (ta.get(k, 0) or 0) + (tb.get(k, 0) or 0) for k in set(ta) | set(tb)}
+    out["stage_group"] = f"{a.get('stage_group')}; {b.get('stage_group')}"
+    if out.get("tile") is None and a.get("tile") is not None:
+        out["tile"] = a["tile"]
+    return out
 
 
 def choose_backend(opts: ExecutionOptions, h: int, w: int, channels: int) -> tuple[str, str]:
@@ -535,32 +884,32 @@ def choose_backend(opts: ExecutionOptions, h: int, w: int, channels: int) -> tup
     return "cpu", "Auto: no validated GPU available."
 
 
-def _tile_plan(P: Params, h: int, w: int, budget_bytes: int | None, forced: int | None) -> int:
+def _tile_plan(halo: int, channels: int, h: int, w: int, budget_bytes: int | None, forced: int | None) -> int:
     """Largest tile edge whose working set (tile + halo) fits the budget; full frame when everything fits."""
     if forced:
         return forced
     full = max(h, w)
     if not budget_bytes:
         return full
-    bpp = estimate_memory_per_pixel(P.channels)
+    bpp = estimate_memory_per_pixel(channels)
     if h * w * bpp <= budget_bytes:
         return full
-    halo = P.halo
     edge = int(np.sqrt(budget_bytes / bpp)) - 2 * halo
     return max(256, (edge // 64) * 64)
 
 
-def _execute(P, exec_in, h, w, channels, mode, opts, backend_name, gpu_disabled, timings, check):
-    """Run the contiguous pixel group; classified GPU failures retry once with smaller tiles, then rerun on CPU
+def _execute(fn, exec_in, out_keys, halo, h, w, channels, opts, backend_name, gpu_disabled, timings, check, stage_name):
+    """Run one contiguous pixel group; classified GPU failures retry once with smaller tiles, then rerun on CPU
     from the clean host inputs (never continuing from partial results)."""
     factory = opts.backend_factory or (lambda name: get_backend(name))
     info: dict[str, Any] = {
         "requested_device": opts.device, "resolved_backend": backend_name, "fallbacks": [], "precision": "float32",
-        "stage_group": "background,denoise,tone,star protection,local contrast,color,clip count",
+        "stage_group": stage_name,
     }
     attempts = [backend_name]
     tile_override: int | None = None
     notes: list[str] = []
+    shape = exec_in["x"].shape
     while attempts:
         name = attempts.pop(0)
         be: Backend | None = None
@@ -573,18 +922,15 @@ def _execute(P, exec_in, h, w, channels, mode, opts, backend_name, gpu_disabled,
                 info["gpu_budget_bytes"] = budget
             else:
                 be = factory("cpu")
-            tile = tile_override or _tile_plan(P, h, w, budget, opts.force_tile)
+            tile = tile_override or _tile_plan(halo, channels, h, w, budget, opts.force_tile)
             info["tile"] = None if tile >= max(h, w) else tile
-            outputs = {"y": np.empty(exec_in["x"].shape, dtype=np.float32)}
-            if mode == "linear":
-                outputs["proc"] = np.empty(exec_in["x"].shape, dtype=np.float32)
-                outputs["fixed"] = np.empty(exec_in["x"].shape, dtype=np.float32)
+            outputs = {k: np.empty(shape, dtype=np.float32) for k in out_keys}
             t0 = time.perf_counter()
-            extras = run_tiled(lambda t, inner: _group(be, t, inner, P), exec_in, outputs, tile, P.halo if tile < max(h, w) else 0, check)
-            counts = merge_clip_counts(extras)
+            extras = run_tiled(lambda t, inner: fn(be, t, inner), exec_in, outputs, tile, halo if tile < max(h, w) else 0, check)
+            counts = merge_clip_counts([e for e in extras if e is not None]) if any(e is not None for e in extras) else None
             be.synchronize()
             elapsed = time.perf_counter() - t0
-            timings.items.append({"stage": "pixel group", "backend": name, "seconds": round(elapsed, 4), "tile": info["tile"]})
+            timings.items.append({"stage": stage_name, "backend": name, "seconds": round(elapsed, 4), "tile": info["tile"]})
             info.update(actual_backend=name, device=be.device_label, transfers=be.transfers.as_dict(), notes=notes)
             info["label"] = "Processing: NVIDIA GPU" if name == "gpu" else "Processing: CPU"
             be.release()
@@ -617,84 +963,231 @@ def _execute(P, exec_in, h, w, channels, mode, opts, backend_name, gpu_disabled,
     raise ProcessingError("EXECUTION_FAILED", "Processing could not be completed on any backend.")
 
 
-def _operation_report(recipe, image, P, bg_status, bg_model, star, tone_stage, manual, channels, mode, backend, reduction, is_noop, regions):
+# ====================================================================================================== report
+@dataclass
+class _ReportCtx:
+    recipe: Recipe
+    image: ImageData
+    mode: str
+    rgb: bool
+    A: GroupA
+    B: GroupB
+    sp: StretchParams | None
+    star: StarMask | None
+    bg_status: dict[str, Any]
+    bg_model: bgmod.BgModel | None
+    bg_strength: float
+    grad_status: dict[str, Any]
+    grad_model: lp.GradientModel | None
+    neutral_status: dict[str, Any]
+    sky: lp.SkyStats | None
+    wb: lp.WhiteBalance
+    wb_status: dict[str, Any]
+    deconv_status: dict[str, Any]
+    hdr_status: dict[str, Any]
+    scnr_status: dict[str, Any]
+    reduction: float
+    is_noop: bool
+    regions: list[dict[str, int]]
+    backend: str
+    tone_stage: bool
+    ai: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+def _operation_report(c: _ReportCtx) -> list[dict[str, Any]]:
     ops: list[dict[str, Any]] = []
-    be_label = "gpu" if backend == "gpu" else "cpu"
+    be_label = "gpu" if c.backend == "gpu" else "cpu"
+    r, A, B = c.recipe, c.A, c.B
+    reduced = c.reduction < 1
 
     def add(name, requested, status, reason=None, params=None, backend_used=None):
         ops.append({"name": name, "requested": requested, "status": status, "reason": reason, "parameters": params, "backend": backend_used})
 
-    if recipe.background.enabled:
-        if bg_model is not None:
-            add("background", True, "reduced" if reduction < 1 else "applied", None, {
-                **bg_model.to_dict(), "strength": bgmod_strength(recipe, reduction),
-                "note": "Constant offsets and (for planar) a shared plane relative to a recorded reference sky level; constant subtracted once.",
+    if r.background.enabled:
+        if c.bg_model is not None:
+            add("background", True, "applied", None, {
+                **c.bg_model.to_dict(), "strength": c.bg_strength,
+                "note": "Supervised: constant offsets and (for planar) a shared plane relative to a recorded reference sky level; constant subtracted once.",
             }, be_label)
         else:
-            add("background", True, "skipped", bg_status.get("reason"))
+            add("background", True, "skipped", c.bg_status.get("reason"))
     else:
         add("background", False, "off")
-    if recipe.denoise.enabled and P.denoise:
-        add("denoise", True, "applied", None, P.denoise.to_dict(), be_label)
+
+    def add_ai(name, requested):
+        st = c.ai.get(name)
+        if st is None:
+            if not requested:
+                add(name, False, "off")
+            return
+        add(name, True, st["status"], st.get("reason"), st.get("params"), (st.get("params") or {}).get("execution_provider") if st["status"] == "applied" else None)
+
+    add_ai("ai_background", r.ai.background)
+    if c.mode == "linear":
+        st = c.grad_status
+        add("gradient", r.auto.gradient, st["status"], st["reason"], c.grad_model.to_dict() if (c.grad_model and st["status"] == "applied") else None,
+            be_label if st["status"] == "applied" else None)
+    elif r.auto.gradient and not c.is_noop:
+        add("gradient", True, c.grad_status.get("status", "inactive"), c.grad_status.get("reason"))
+    st = c.neutral_status
+    add("neutralize", r.auto.neutralize, st["status"] if r.auto.neutralize else "off", st["reason"], {
+        "sky_per_channel": list(c.sky.level) if c.sky else None, "pedestal": A.pedestal if A.sky is not None else None,
+        "rendered_offsets": A.rendered_offsets.tolist() if A.rendered_offsets is not None else None,
+        "note": "Per-channel sky offsets to one shared level (an offset per channel, never a per-channel scale)",
+    } if st["status"] == "applied" else None, be_label if st["status"] == "applied" else None)
+    if c.rgb:
+        st = c.wb_status
+        add("white_balance", r.auto.white_balance, st["status"] if r.auto.white_balance else "off", st["reason"],
+            c.wb.to_dict() if st["status"] in ("applied", "skipped") and c.mode == "linear" else None, be_label if st["status"] == "applied" else None)
+    st = c.deconv_status
+    add("deconvolution", r.advanced.deconvolution, st["status"], st["reason"], A.deconv.to_dict() if A.deconv else None, be_label if A.deconv else None)
+    add_ai("ai_denoise", r.ai.denoise)
+    if A.denoise is not None:
+        add("denoise", True, "applied", None, A.denoise.to_dict(), be_label)
+    elif (c.ai.get("ai_denoise") or {}).get("status") == "applied":
+        add("denoise", True, "inactive", "Replaced by AI noise reduction.")
     else:
         add("denoise", False, "off")
-    if tone_stage:
-        add("tone", True, "reduced" if reduction < 1 and recipe.tone.enabled else "applied", None, {
-            "base": ("rational midtone curve" if mode == "rendered" else "luminance asinh") if recipe.tone.enabled else "baseline (identity / frozen baseline mapping)",
-            "gain": P.gain if (recipe.tone.enabled and mode == "rendered") else None,
-            "asinh_k": P.k if (recipe.tone.enabled and mode == "linear") else None,
-            "enhanced_frame": P.eframe.to_dict() if (P.eframe and recipe.tone.enabled) else None,
-            "manual": manual.to_dict(),
-        }, be_label)
+    if c.tone_stage:
+        params: dict[str, Any] = {"manual": B.manual.to_dict()}
+        if r.tone.enabled and c.mode == "linear" and c.sp:
+            params.update(base="hyperbolic luminance stretch with highlight convergence + MTF to the target sky", stretch=c.sp.to_dict())
+        elif r.tone.enabled:
+            params.update(base="rational midtone gain + MTF toward the target sky", gain=B.rend_gain, mtf_m=B.rend_m)
+        else:
+            params.update(base="baseline (identity / frozen baseline mapping)")
+        add("tone", True, "applied", None, params, be_label)
     else:
         add("tone", False, "off")
-    if recipe.star_protection.enabled:
-        if not tone_stage:
-            add("star_protection", True, "inactive", "The tone stage is disabled, so there is no stretch to protect against.")
-        elif star is None or not star.reliable:
-            reason = (star.stats.get("reason") if star else None) or "Star detection was unreliable."
-            add("star_protection", True, "skipped", f"{reason}. General highlight roll-off still applies.", star.stats if star else None)
+    add_ai("ai_stars", r.ai.stars)
+    if r.auto.star_stretch and B.separated and c.tone_stage and r.tone.enabled:
+        add("star_stretch", True, "applied", None, {
+            "method": "stars separated by the AI tool are added back over the finished starless image with the brightness the stretch gives them, "
+                      "blended toward the gentler stretch (D/8, same sky level)",
+            "amount": B.star_amount, "gentle_stretch": B.sp_star.to_dict() if B.sp_star else None,
+        }, be_label)
+    elif r.auto.star_stretch:
+        if not (c.tone_stage and r.tone.enabled):
+            add("star_stretch", True, "inactive", "The stretch is disabled, so there is nothing to soften on stars.")
+        elif c.star is None or not c.star.reliable:
+            reason = (c.star.stats.get("reason") if c.star else None) or "Star detection was unreliable."
+            add("star_stretch", True, "skipped", f"{reason}. Highlight convergence still keeps star cores from clipping.", c.star.stats if c.star else None)
         else:
-            add("star_protection", True, "applied", None, {"amount": P.star_amount, "accepted_stars": star.stats.get("accepted"), "detection": star.stats}, be_label)
+            add("star_stretch", True, "applied", None, {
+                "amount": B.star_amount, "accepted_stars": c.star.stats.get("accepted"),
+                "method": "gentler stretch (D/8, same sky level) blended inside the soft star mask" if c.mode == "linear"
+                else "limits extra brightening of confident compact stars",
+                "gentle_stretch": B.sp_star.to_dict() if B.sp_star else None, "detection": c.star.stats,
+            }, be_label)
     else:
-        add("star_protection", False, "off")
-    if recipe.local_contrast.enabled and P.lc:
-        add("local_contrast", True, "reduced" if reduction < 1 else "applied", None, {**P.lc.to_dict(), "domain": "display-only"}, be_label)
+        add("star_stretch", False, "off")
+    st = c.hdr_status
+    add("hdr", r.look.protect_cores, ("reduced" if reduced and st["status"] == "applied" else st["status"]) if r.look.protect_cores else "off", st["reason"],
+        {"amount": B.hdr_amount, "sigma_px": fin.HDR_SIGMA, "threshold": fin.HDR_THRESHOLD} if st["status"] == "applied" else None,
+        be_label if st["status"] == "applied" else None)
+    if c.rgb:
+        st = c.scnr_status
+        add("green_removal", r.auto.green_removal, st["status"] if r.auto.green_removal else "off", st["reason"],
+            {"method": "SCNR average neutral, lightness preserved", "amount": B.scnr_amount} if st["status"] == "applied" else None,
+            be_label if st["status"] == "applied" else None)
+    if r.look.contrast > 0:
+        add("contrast", True, "reduced" if reduced else "applied", None, {"s_curve_amplitude": B.pop_a, "anchored_at_sky": B.sky_disp}, be_label)
     else:
-        add("local_contrast", False, "off")
-    if recipe.color.enabled and channels == 1:
+        add("contrast", False, "off")
+    if B.detail is not None:
+        add("detail", True, "reduced" if reduced else "applied", None, {**B.detail.to_dict(), "domain": "display-only"}, be_label)
+    else:
+        add("detail", False, "off")
+    if r.look.color > 0 and not c.rgb:
         add("color", True, "skipped", "Monochrome image: color enhancement is not available.")
-    elif recipe.color.enabled:
-        add("color", True, "reduced" if reduction < 1 else "applied", None, {"saturation": P.saturation, "domain": "display RGB only (never in the processed-linear FITS)"}, be_label)
+    elif r.look.color > 0:
+        add("color", True, "reduced" if reduced else "applied", None, {
+            "saturation": B.saturation, "protected_below": B.sky_disp + B.sky_sd, "domain": "display RGB only (never in the processed-linear FITS)",
+        }, be_label)
     else:
         add("color", False, "off")
-    if recipe.protect_regions:
-        add("protect_regions", True, "applied" if regions else "off", None if regions else "No label regions were confirmed.", {"count": len(regions)} if regions else None)
-    if is_noop:
+    if r.protect_regions:
+        add("protect_regions", True, "applied" if c.regions else "off", None if c.regions else "No label regions were confirmed.", {"count": len(c.regions)} if c.regions else None)
+    if c.is_noop:
         ops.append({"name": "no_operations", "requested": True, "status": "applied", "reason": "No operations were selected; the decoded display pixels are reproduced unchanged.", "parameters": None, "backend": None})
     return ops
 
 
-def bgmod_strength(recipe, reduction):
-    return _strength("background", recipe.background.strength, recipe.advanced.background_strength, 1.0, 0.0) * reduction
-
-
 def _summary_note(ops) -> str:
     phrases = {
+        ("gradient", "applied"): "Gradient removed",
+        ("neutralize", "applied"): "Background neutralized",
+        ("white_balance", "applied"): "Color balanced",
+        ("deconvolution", "applied"): "Sharpened (deconvolution)",
         ("denoise", "applied"): "Noise reduced",
-        ("tone", "applied"): "Midtones brightened",
-        ("tone", "reduced"): "Midtones brightened (reduced to limit clipping)",
-        ("local_contrast", "applied"): "Local contrast added",
+        ("tone", "applied"): "Stretched",
+        ("star_stretch", "applied"): "Stars kept small",
+        ("hdr", "applied"): "Bright cores protected",
+        ("hdr", "reduced"): "Bright cores protected (reduced to limit clipping)",
+        ("green_removal", "applied"): "Green cast removed",
+        ("contrast", "applied"): "Contrast added",
+        ("contrast", "reduced"): "Contrast added (reduced to limit clipping)",
+        ("detail", "applied"): "Detail enhanced",
+        ("detail", "reduced"): "Detail enhanced (reduced to limit clipping)",
         ("color", "applied"): "Colors enhanced",
+        ("color", "reduced"): "Colors enhanced (reduced to limit clipping)",
         ("background", "applied"): "Background balanced",
-        ("star_protection", "applied"): "Stars protected",
+        ("ai_background", "applied"): "AI background removed",
+        ("ai_denoise", "applied"): "AI noise reduction",
+        ("ai_stars", "applied"): "Stars separated (AI) and added back",
     }
     parts = []
+    quiet_skips = {"hdr", "green_removal", "gradient"}  # automatic stages that are expected to skip on many images
     for op in ops:
         if op["name"] == "no_operations":
             parts.append("No operations selected")
-        elif op["status"] == "skipped":
-            parts.append(f"{op['name'].replace('_', ' ').capitalize()} skipped")
+        elif op["status"] == "skipped" and op["name"] not in quiet_skips:
+            parts.append(f"{AI_LABELS.get(op['name']) or op['name'].replace('_', ' ').capitalize()} skipped")
         elif (op["name"], op["status"]) in phrases:
             parts.append(phrases[(op["name"], op["status"])])
     return " · ".join(parts) or "Complete"
+
+
+# ====================================================================================================== AI helpers
+AI_STRETCH_NOISE_RATIO = 0.5
+AI_LABELS = {"ai_background": "AI background extraction", "ai_denoise": "AI noise reduction", "ai_stars": "AI star separation"}
+
+
+def _ai_model(opts: ExecutionOptions, tool: str, rgb: bool) -> tuple[ai_registry.ModelSpec, Path | None, str | None]:
+    ids = ai_registry.TOOL_MODELS[tool]
+    spec = ai_registry.MODELS[ids[0] if (tool != "stars" or rgb) else ids[1]]
+    path = ai_registry.installed(opts.ai_models_dir, spec)
+    if path is None:
+        return spec, None, f"The AI model '{spec.title}' is not downloaded yet (Settings > AI models); the classical step was used instead."
+    return spec, path, None
+
+
+def _run_ai(opts: ExecutionOptions, tool: str, rgb: bool, progress, label: str, fn, nchw: bool = False) -> dict[str, Any]:
+    """Run one AI tool. ``fn(runner)`` returns (result, params). Failures are reported, never fatal (the classical step runs)."""
+    spec, path, reason = _ai_model(opts, tool, rgb)
+    if path is None:
+        return {"status": "skipped", "reason": reason}
+    progress(label)
+    info = AIStepInfo(spec)
+    try:
+        run = Runner(path, opts.device, nchw=nchw)
+        result, params = timed(info, lambda: fn(run))
+    except Cancelled:
+        raise
+    except Exception as exc:
+        return {"status": "skipped", "reason": f"The AI model could not run ({type(exc).__name__}: {str(exc)[:160]}); the classical step was used instead."}
+    info.provider, info.fallbacks = run.label, run.fallbacks
+    info.params.update(params)
+    return {"status": "applied", "reason": None, "params": info.to_dict(), "result": result}
+
+
+def _percent(progress, label: str):
+    last = [-1]
+
+    def cb(f: float) -> None:
+        pct = int(f * 10) * 10
+        if pct != last[0]:
+            last[0] = pct
+            progress(f"{label} {pct}%")
+
+    return cb

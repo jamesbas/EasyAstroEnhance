@@ -1,6 +1,29 @@
 # EasyAstroEnhance — Application Development Specification
 
-Version 1.2 • November 12, 2026 • Prepared for Jaime Basilico
+Version 1.5 • November 15, 2026 • Prepared for Jaime Basilico
+
+> **Amendment 1.5 (optional AI tools; revises decision D1).** At the user's request, three opt-in learned tools are
+> added (engine 1.2.0, recipe schema 4): **AI background extraction** (GraXpert background model), **AI noise reduction**
+> (GraXpert denoising model) and **AI star separation** (Cosmic Clarity Dark Star; the stars are always added back). They
+> are image-to-image restoration networks run locally through ONNX Runtime (DirectML GPU on Windows, CPU fallback) — no
+> prompts, no reference images, no text-to-image generation, no cloud. All are off by default and in every built-in
+> preset; each replaces one classical step, is skipped with a reason (classical step used) when its model is missing or
+> cannot run, and is disclosed per run with the model file, version, SHA-256, licence and execution provider. Models
+> are pinned (fixed URL + SHA-256) and downloaded only when the user asks. Fidelity rules 1 and 8 are amended; see §4
+> "Version 1.3 — optional AI tools".
+
+> **Amendment 1.4 (stacking).** At the user's request the app can now stack: raw sub-frames from a folder (for example a
+> Seestar `…_sub` folder) with optional darks/flats/bias/dark-flats, and already stacked images of one target from several
+> nights. Stacking is a separate, explicit action ("Stack frames…"); it creates a new linear FITS image in the app and
+> enhances it only when the user ticked **Enhance automatically when stacking finishes** (default off, so settings can be
+> adjusted first). See §4 "Version 1.2 — stacking". Sections 1, 4 and 6 are amended; superseded text is marked.
+
+> **Amendment 1.3 (engine 1.1, one-button Enhance).** Adopts the decisions D1–D4 of [improve-enhance.md](improve-enhance.md) §2.5:
+> D1 — learned/AI processing stays excluded; D2 — an opt-in, SNR-gated deconvolution and a noise/edge-gated multiscale
+> "Detail" stage are allowed (star removal and star-size reduction stay disabled); D3 — background neutralization, low-order
+> gradient removal and a bounded star-based white balance run automatically, skip with a reason and can be switched off;
+> D4 — ZWO Seestar FITS keep their stored (top-down) row order so results match the telescope's JPG. Sections 2, 3, 4, 6 and 8
+> are amended accordingly; superseded text is marked.
 
 ## 1. Product outcome
 
@@ -13,8 +36,8 @@ This is a specification for implementation in Visual Studio Code with GitHub Cop
 - Windows 11 is the primary development and user platform; keep the Python core portable.
 - Run a Python service on localhost and open the UI in the user's browser.
 - Single user, local disk, sequential batch processing. Prefer optional NVIDIA GPU acceleration for eligible workloads, with a complete CPU fallback. Primary GPU target: the user’s NVIDIA GeForce RTX 5070 Ti with 16 GB VRAM; verify installed device capabilities at runtime.
-- Each uploaded image is processed independently. Selecting ten exposures does not stack them.
-- The Seestar already performs stacking and produces FITS. Treat the telescope-produced integrated/stacked RGB or monochrome image as the primary FITS input; do not add a stacking workflow. The preferred FITS input is an integrated/stacked RGB or monochrome image. Individual raw exposures, CFA mosaics and ambiguous multidimensional data receive explanatory intake guidance.
+- Each uploaded image is processed independently. Selecting ten exposures does not stack them. *(Amended 1.4: stacking is a separate "Stack frames…" action on a folder.)*
+- The Seestar already performs stacking and produces FITS. Treat the telescope-produced integrated/stacked RGB or monochrome image as the primary FITS input; ~~do not add a stacking workflow~~ *(amended 1.4: an optional stacking workflow exists, see §4)*. The preferred FITS input is an integrated/stacked RGB or monochrome image. Individual raw exposures, CFA mosaics and ambiguous multidimensional data receive explanatory intake guidance.
 - Start with a conservative Natural preset. Advanced controls remain collapsed.
 - Work from immutable originals; every adjustment starts from the source, not an earlier export.
 
@@ -22,14 +45,14 @@ This is a specification for implementation in Visual Studio Code with GitHub Cop
 
 These are release requirements, not optional marketing promises:
 
-1. Never call an image-generation service, diffusion model, generative fill, learned reconstruction, synthetic-star tool, super-resolution model or external image repository.
+1. Never call an image-generation service, diffusion model, generative fill, learned reconstruction, synthetic-star tool, super-resolution model or external image repository. *(Amended 1.5: the three opt-in AI tools of §4 "Version 1.3" — learned background extraction, denoising and star separation run locally on the image's own pixels — are the only permitted learned processing; they are off by default and disclosed per run. Text-to-image, diffusion, generative fill, super-resolution and reference images remain forbidden.)*
 2. Do not substitute reference photographs of the named object or use object identity to invent its appearance.
 3. Preserve field of view, dimensions, star coordinates, orientation and existing structures. Apply EXIF orientation once and document it. Do not crop, rotate, resize or remove stars automatically.
 4. Preserve originals byte-for-byte. Processing changes pixels; avoid claiming that every output pixel is an original measured value or that filtering guarantees preservation of all faint signal.
 5. Keep edits reproducible with source SHA-256, pipeline version, algorithm settings, resolved per-file parameters and dependency versions.
-6. Distinguish display enhancement from scientific calibration. Background neutralization is not photometric color calibration; a sharper appearance is not additional measured resolution.
+6. Distinguish display enhancement from scientific calibration. Background neutralization and star-based white balance are not photometric color calibration; a sharper appearance is not additional measured resolution.
 7. Preserve burned-in telescope labels using explicit protected regions. Never reconstruct sky behind lettering.
-8. Disable deconvolution, sharpening, star removal and star-size reduction in version 1. Their artifacts and validation requirements are outside initial scope.
+8. Star removal and star-size reduction stay disabled. *(Amended 1.5: AI star separation splits stars from the background only so each is processed appropriately; the stars are always added back and no output is starless.)* *(Amended 1.3:)* Deconvolution is available only as an opt-in Advanced option on linear stacks (star-measured PSF, damped, SNR-gated, star cores excluded); the multiscale Detail stage is noise- and edge-gated and bounded. Both are disclosed per run.
 9. Report applied, reduced and skipped operations per image. Never silently claim success for an unsupported operation.
 
 ## 3. Current skill audit and migration boundary
@@ -64,7 +87,7 @@ L_mapped = gain * L_denoised / (1 + (gain - 1) * L_denoised)
 # Reconstruct RGB by a luminance ratio; apply protected saturation last.
 ```
 
-These constants apply to the rendered baseline only. They are not valid physical noise estimates for arbitrary linear FITS. Handle zero denominators, negative channels, out-of-range results and invalid pixels deliberately. Avoid intermediate clipping; record clipping before final display export. Do not normalize each channel separately.
+These constants apply to the rendered baseline only. They are not valid physical noise estimates for arbitrary linear FITS. Handle zero denominators, negative channels, out-of-range results and invalid pixels deliberately. Avoid intermediate clipping; record clipping before final display export. Do not normalize each channel separately. *(Amended 1.3: per-channel sky **offsets** to one shared pedestal and bounded, recorded white-balance **gains** are allowed as explicit linear operations; the shared normalization itself remains one scale for all channels.)*
 
 ## 4. Scope and delivery stages
 
@@ -81,9 +104,77 @@ These constants apply to the rendered baseline only. They are not valid physical
 - Local history, reproducible processing report, reprocessing and cancel.
 - Friendly intake resolution for unknown FITS state/HDU/channel layout.
 
+### Version 1.1 — one-button Enhance (amendment 1.3)
+
+- Built-in presets by desired output: Natural, Vivid, Faint detail, Bright core (HDR), Star field, Seestar match.
+- Six main sliders (Background, Stretch, Contrast/Pop, Color, Detail, Noise reduction) plus **Protect bright cores**.
+- Automatic stages for linear stacks: low-coverage edge masking, low-order gradient model, background neutralization, bounded field-star white balance, multiscale wavelet denoise, auto-solved hyperbolic stretch with highlight convergence, gentler star stretch, HDR core compression and green removal when detected. Each runs or is skipped with a recorded reason and can be switched off in Advanced.
+- Opt-in Richardson–Lucy deconvolution (Advanced).
+
+### Version 1.2 — stacking (amendment 1.4)
+
+- **Input:** an absolute folder path typed or pasted by the user; folders are scanned non-recursively and only read. FITS
+  frames are classified by `IMAGETYP` (or the file-name prefix) into lights, darks, flats, bias and dark-flats; separate
+  calibration folders may be given. Raw CFA/mono sub-frames are stacked ("subs"); if the folder holds only stacked RGB
+  images they are combined ("sessions", several nights). Mixed sizes/filters/patterns are reported and excluded, never
+  silently merged.
+- **Subs pipeline:** median master frames → dark (or bias) subtraction → flat division (master flat normalized per Bayer
+  site so colour balance is unchanged) → cosmetic correction of fixed defective pixels (found on the master dark, or on a
+  temporal median of lights; replaced by same-colour neighbours; counted) → frame measurement on a 2 × 2 super-pixel proxy
+  (stars, FWHM, elongation, transparency, background, noise) → frame grading (Off/Lenient/Standard/Strict; each rejection
+  has a reason) → star registration (triangle invariants + RANSAC similarity: rotation, scale, shift, which covers alt-az
+  field rotation) → bilinear debayer → additive per-channel background normalization → bilinear resampling onto the
+  reference frame → noise-weighted (1/σ²) mean with iterative kappa-sigma rejection (exact, median-centred, for up to 40
+  frames that fit the RAM budget; two-pass streaming otherwise).
+- **2× drizzle (optional, subs only):** Bayer drizzle with a point kernel and bilinear weights of measured CFA samples only,
+  rejection against the native statistics; output pixels no frame reached are filled from the upsampled native stack and
+  the filled fraction is reported.
+- **Sessions:** star registration at any scale, resampling onto the largest image, background matching, weights by
+  integration time, kappa-sigma rejection from three images on.
+- **Output:** float32 RGB (or mono) FITS in source units, `ROWORDER=TOP-DOWN`, `STACKCNT`, `LIVETIME`, `HISTORY`; pixels
+  with no coverage are NaN (masked by the reader). The file becomes a new immutable original with state "linear stack".
+  A stack report (frames used/rejected with reasons, calibration, registration, normalization, weights, rejection,
+  timing, device) is stored with the stack.
+- **Fidelity:** every output value is a weighted mean of measured, resampled pixel values; nothing is synthesized. The
+  only interpolation is bilinear debayering/resampling (and the disclosed drizzle hole filling).
+- **Scheduling:** stacks share the single worker with enhancement jobs (oldest first), report progress, can be cancelled
+  and retried, are marked interrupted after a restart, and are removed by Clear local history. Debayering and
+    resampling may use the NVIDIA GPU (CuPy) with the CPU as the reference implementation.
+- **Enhancement after stacking:** only when the user ticked "Enhance automatically when stacking finishes" (default off);
+  the recipe/preset at that moment is snapshotted into the stack.
+
+### Version 1.3 — optional AI tools (amendment 1.5)
+
+- **Recipe:** `ai = {background, denoise, stars}`, all `false` by default and in every built-in preset (selecting a
+  built-in preset keeps the user's AI switches; saved presets carry their own). Schema 3 recipes and saved presets are
+  migrated automatically with the AI tools off.
+- **AI background extraction (linear stacks):** GraXpert background model 1.0.1, fed exactly as in GraXpert (frame shrunk
+  to 256 px, median/MAD normalization); the predicted background is blurred, enlarged and subtracted zero-median per
+  channel in place of the polynomial gradient model. Not used with a confirmed manual background.
+- **AI noise reduction (linear and rendered):** GraXpert denoising model 3.0.2 (256 px tiles, stride 128, star cores
+  above 250 MAD pass through unchanged), strength = the Noise reduction slider, in place of the wavelet denoise. If the
+  model cannot run, the wavelet denoise runs instead. Because AI smoothing flattens the sky far more than its true noise
+  drops, the stretch solver treats AI-denoised data as at most 2x cleaner than before (about what full-strength wavelet
+  denoise measures), so the result is cleaner at a comparable stretch rather than over-stretched.
+- **AI star separation (linear stacks):** Cosmic Clarity Dark Star v2.1c (colour) / v2.1 (mono) under a temporary,
+  exactly inverted midtone stretch, with the large-scale background above the sky level taken out before inference (so
+  a bright galaxy bulge is not mistaken for a star) and any star-layer structure wider than a star returned to the
+  starless layer. `starless + stars` equals the input exactly. Display finishing (stretch, HDR, pop, detail, saturation)
+  is applied to the starless image; the stars are added back with the display brightness the stretch gives them,
+  blended toward the gentler star stretch. The processed-linear FITS is never starless.
+- **Models:** downloaded on request into `<data>/ai-models` from fixed URLs (an identical file in a local GraXpert
+  installation is copied instead), verified by size and SHA-256, removable in Settings. GraXpert models are
+  CC BY-NC-SA 4.0 (non-commercial use); Dark Star is MIT. The cache key of a run includes which model files were used.
+- **Disclosure:** each AI operation in the report records model id, file, version, SHA-256, licence, attribution,
+  execution provider, timing and fallbacks; `learned_processing` lists them; the scientific disclosure states that those
+  values were predicted by trained networks; processed FITS HISTORY names the model files.
+- **Known limits:** background extraction can darken the faintest outer halo of a frame-filling galaxy; denoising can
+  soften the faintest structure at full strength; star separation leaves very large saturated stars partly in the
+  starless image (they are added back unchanged).
+
 ### Deferred
 
-Calibration frame processing; registration and stacking; automatic debayering; arbitrary cubes and multi-page stacks; plate solving; catalog-based photometric calibration; higher-order/complex spatial gradient removal; star reduction/removal; narrowband palette synthesis; deconvolution; native installer; cloud hosting; accounts; remote mobile access; commercial billing.
+~~Calibration frame processing; registration and stacking; automatic debayering;~~ *(amended 1.4: now in version 1.2 stacking)* arbitrary cubes and multi-page stacks; plate solving; catalog-based photometric calibration; star reduction/removal; narrowband palette synthesis; ~~learned (AI) processing of any kind~~ *(amended 1.5: only the three opt-in AI tools; any other learned processing stays deferred)*; native installer; cloud hosting; accounts; remote mobile access; commercial billing. *(Amended 1.3: low-order (degree ≤ 3) automatic gradient models and opt-in deconvolution are no longer deferred.)*
 
 Deliver an initial JPEG vertical slice first, but do not call the full version 1 complete until real TIFF and stacked FITS fixtures pass validation. Staged development is not permission to omit the requested formats.
 
@@ -195,9 +286,25 @@ Each file card shows thumbnail, filename, dimensions, RGB/monochrome, file type 
 
 Automatically choose the only supported image HDU; if several exist, show a short selector with HDU name, dimensions and preview. For unknown data state show one exceptional prompt: **How was this image saved?** Options: **Linear stack**, **Already processed**, **I'm not sure**. Explain the consequence briefly; “I'm not sure” permits an explicitly labeled preview but blocks full processing until state is confirmed. Do not silently infer linearity from a dark histogram.
 
-Single CFA/raw frames display: **This file needs debayering or stacking first. Export a stacked RGB or monochrome image and add it here.** Keep other supported files ready.
+Single CFA/raw frames display: **This file needs debayering or stacking first. Export a stacked RGB or monochrome image and add it here.** Keep other supported files ready. *(Amended 1.4: raw frames are stacked with **Stack frames…** — top bar or the start screen — which opens a dialog: folder path, Scan (summary of frames, exposure, calibration found, files not used), output size Native/2× drizzle, an Advanced section (frame quality filter, trail rejection), optional calibration folders, and the **Enhance automatically when stacking finishes** checkbox, default off. A banner shows progress with Cancel.)*
 
 ### Enhancement panel
+
+*(Amended 1.3 — one-button Enhance.)* Preset menu: **Natural** (default), **Vivid**, **Faint detail**, **Bright core (HDR)**, **Star field**, **Seestar match**, **Custom**, and user-saved presets, each with a one-line description. Presets are rendering styles chosen by the user; nothing is inferred from the object's name. Below the menu, a **Look** section has six sliders whose values the preset sets and that map to documented, recorded parameters:
+
+| Slider | Range | Behavior |
+|---|---|---|
+| Background | 0.04–0.25 | Display level of the median sky (MTF placement) |
+| Stretch | −1…+1 | Shifts the auto-solved hyperbolic stretch factor by 0.75 decades per unit |
+| Contrast / Pop | 0–1 | S-curve anchored at the sky and white (amplitude 0.8 × value, monotonic) |
+| Color | 0–1 | Saturation 1 + 0.6 × value, protected below the sky noise and near white; unavailable for monochrome |
+| Detail | 0–1 | À trous multiscale contrast, gated by per-scale noise and local edge energy, suppressed near star halos |
+| Noise reduction | 0–1 | Wavelet gated shrinkage, amount 0.9 × value relative to the measured per-scale noise |
+| Protect bright cores | on/off | Highlight-protecting stretch target and HDR core compression when a bright extended core is found |
+
+The supervised **Manual sky regions** correction (constant / planar) and **Preserve labels** remain as before. Advanced exposes switches for each automatic stage, the stretch on/off, opt-in deconvolution, exact values (stretch log D, b, highlight convergence, star softening, core compression, white-balance limit, gradient degree, green removal, denoise scales, detail scale, rendered midtone gain, manual background strength, deconvolution iterations), input state, protected regions and histogram diagnostics. *(The 1.2 table of switches with Gentle/Balanced/Strong buttons below is superseded.)*
+
+<details><summary>Superseded 1.2 text</summary>
 
 Preset menu: **Natural** (default), **Brighter detail**, **Custom**, and user-saved presets. Add **Save preset** beside the preset menu. Both named presets use conservative denoising. Brighter detail increases tone gain modestly; it does not promise additional resolution.
 
@@ -211,13 +318,15 @@ Preset menu: **Natural** (default), **Brighter detail**, **Custom**, and user-sa
 | Local contrast | Off | Gentle, noise-aware enhancement of existing medium-scale structure |
 | Preserve labels | On when a region is confirmed | Exclude a bottom band or arbitrary rectangles from processing |
 
+</details>
+
 Expose an optional **Tone controls** disclosure directly under the main enhancement switches. Include Brightness, Shadows, Highlights and Black point, each with a labeled slider, numeric value, zero/default marker and Reset. Brightness must support both lightening and darkening. Keep black-point movement tightly bounded, show a histogram and clipping overlay when adjusted, and allow instant Reset tone. Start all manual offsets at zero; the selected preset supplies the base stretch. Manual values are offsets from that base, not an additional automatic stretch. Monochrome supports all tone controls.
 
 Inside background settings, offer **Overall balance** and **Uneven sky (gradient)**. Explain the difference briefly. Show sky sample overlays, a proposed correction preview and **Apply correction** / **Skip**. Require confirmation of the spatial model before enabling it for a run. If samples do not support a reliable plane, retain the constant option or skip; never silently substitute a more aggressive model.
 
 Saved presets store enhancement intent, bounded manual tone offsets and engine/schema version in SQLite. Provide create, rename, duplicate and delete. Never store sky rectangles, label regions, per-image normalization, star masks, FITS HDU choices or fitted gradient coefficients in a reusable preset. Selecting a preset that requests background correction marks that operation pending until each new image has confirmed regions/model. Snapshot presets into each run; later edits cannot change past results. Reject incompatible presets with migration guidance.
 
-Use three strength buttons (Gentle / Balanced / Strong) rather than raw numeric fields in the main UI. Strong is still bounded and must run clipping checks. Advanced can expose exact values, input state, protected regions and histogram diagnostics. Never let “Apply to all” copy sky or caption coordinates across unrelated images. A shared recipe shares intent; masks and derived parameters belong to each asset.
+Use three strength buttons (Gentle / Balanced / Strong) rather than raw numeric fields in the main UI. *(Amended 1.3: the main UI uses the bounded Look sliders above; strength buttons remain only for manual sky-region correction.)* Strong is still bounded and must run clipping checks. Advanced can expose exact values, input state, protected regions and histogram diagnostics. Never let “Apply to all” copy sky or caption coordinates across unrelated images. A shared recipe shares intent; masks and derived parameters belong to each asset.
 
 Natural starting candidates for the rendered path: denoise 0.30, rational gain 1.25, saturation 1.08. Brighter detail: 0.40, 1.45, 1.12. These are proposed tuning values, not proven universal presets. Validate on multiple targets before locking defaults. Background strength defaults to 0.5 only after confirmed sky patches. The sky pedestal is selected per image to avoid black clipping; there is no universal fixed value.
 
@@ -262,7 +371,7 @@ Canonical object: `ImageData(pixels, channel_layout, domain, units, valid_mask, 
 
 Astropy normally applies BSCALE/BZERO when accessing scaled image data. Use one documented strategy: accept physical-value scaling on read, copy the source header before data access, and never apply scaling a second time. Record original scaling. On float export remove stale integer scaling/BLANK cards and update structural cards/checksums through Astropy. Preserve appropriate observing metadata and WCS; annotate changed photometry/units and provenance. Do not preserve invalid DATAMIN/DATAMAX or misleading BUNIT values unchanged. Save original headers separately for traceability.
 
-Select axes from supported layout and metadata. Do not assume every shape starting with 3 is RGB. File-specific decisions must be confirmed when ambiguous. WCS and visual display orientation must remain consistent on export; do not flip source arrays just to match a browser convention.
+Select axes from supported layout and metadata. Do not assume every shape starting with 3 is RGB. File-specific decisions must be confirmed when ambiguous. WCS and visual display orientation must remain consistent on export; do not flip source arrays just to match a browser convention. *(Amended 1.3: FITS rows are treated as bottom-up unless `ROWORDER` says otherwise; ZWO Seestar files (CREATOR/INSTRUME/TELESCOP containing "Seestar") without `ROWORDER` are stored top-down and are kept as stored, which matches the telescope's own JPG; export restores the stored order either way.)*
 
 ## 8. Processing pipeline
 
@@ -302,6 +411,8 @@ Specify and record the shared scale, display black, white span and k; choose the
 
 Monochrome stays monochrome. Unknown/narrowband channel mappings are preserved and disclosed; no automatic Hubble palette. No automatic photometric calibration is included.
 
+*(Amended 1.3 — engine 1.1 linear path.)* The linear path runs two pixel groups. **Group A** (saved as processed-linear): supervised background (if confirmed) → automatic low-order gradient model (robust polynomial, degree ≤ 3, fitted to sigma-clipped sky boxes away from stars and extended signal; skipped with a reason when samples are insufficient, poorly distributed or the gradient is negligible) → background neutralization (per-channel sky from the dimmer 75 % of the frame, offset to one shared pedestal of 3σ) → bounded white balance from isolated, unsaturated field stars (gains limited to 1/1.25–1.25 by default, skipped when fewer than 15 stars or inconsistent colors) → optional deconvolution → à trous wavelet noise reduction. **Group B** (display only): hyperbolic luminance stretch `Ls = (asinh(D·L+b) − asinh(b)) / (asinh(D+b) − asinh(b))` with highlight convergence `rgb = Ls·(r(1−Ls^p) + Ls^p)` and color confidence near the sky; the white point is the data maximum; D is auto-solved so the 99.9th percentile of star-free signal lands at 0.88 (0.96 without core protection); an MTF then places the median sky exactly at the Background level with a floor 5σ below the sky. The frozen baseline ("Original") is a linked autostretch (median − 2.8σ shadows, sky at 0.15). Low-coverage borders are excluded from every statistic and never cropped. *(The asinh renderer above describes engine 1.0.)*
+
 ### Background correction requirements
 
 Version 1 supports constant background neutralization and an optional supervised first-order spatial correction. Require at least three non-overlapping confirmed patches for the constant model. For the planar model require at least six confirmed, widely distributed, non-collinear patches spanning both axes, with adequate valid pixels and low star contamination. Six is an initial engineering minimum, not proof of reliable sky. Validate coordinates, spatial coverage, sample counts and finite statistics server-side. Exclude stars, captions and invalid regions from estimates.
@@ -309,6 +420,8 @@ Version 1 supports constant background neutralization and an optional supervised
 Use robust patch medians and fit only a plane `a + b*x + c*y` in normalized coordinates, using robust regression and uncertainty/residual checks. No high-order polynomials, automatic learned background replacement or object-dependent models. For RGB, estimate a shared spatial sky-brightness trend plus constant channel offsets first; enable independent channel planes only after separate validation of color gradients. Subtract the gradient relative to a recorded reference sky level, then optionally apply constant neutralization; do not subtract the constant twice. Keep physical negative values in linear working data rather than clamping them. Model sampling precedes stretching on linear inputs.
 
 Show sample positions, model preview and residual statistics. Flag inadequate coverage, outliers, ill-conditioned fits and evidence of extended signal. Require user confirmation and allow samples to be excluded. Automatic checks cannot prove a patch is empty sky. For frame-filling nebulosity or inconsistent samples, skip spatial correction. Persist the model and confirmation per asset/run; never transfer them through presets or Apply to all. High-order gradients and correction without credible sky remain deferred.
+
+*(Amended 1.3.)* The supervised flow above remains for manual control. In addition, the automatic stages of engine 1.1 (neutralization, low-order gradient, white balance) run without confirmation on linear stacks because each validates its own samples, records its model and skips with a reason when the sky is not credible; they are switched off individually in Advanced and are skipped when a confirmed manual correction is used.
 
 ### Direct tonal controls
 

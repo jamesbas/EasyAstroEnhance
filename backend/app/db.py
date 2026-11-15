@@ -41,11 +41,18 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS exports (
   id TEXT PRIMARY KEY, state TEXT NOT NULL, created_at TEXT NOT NULL, path TEXT, detail TEXT
 );
+CREATE TABLE IF NOT EXISTS stacks (
+  id TEXT PRIMARY KEY, request_key TEXT UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, state TEXT NOT NULL,
+  name TEXT NOT NULL, request TEXT NOT NULL, stage TEXT, progress REAL, report TEXT, error TEXT, asset_id TEXT,
+  auto_enhance INTEGER NOT NULL DEFAULT 0, recipe TEXT, preset_snapshot TEXT, settings_snapshot TEXT, job_id TEXT,
+  started_at TEXT, finished_at TEXT
+);
 """
 
 JSON_COLUMNS = {
     "inspection", "interpretation", "regions", "background", "prepared", "error", "recipe", "preset_snapshot",
     "settings_snapshot", "notes", "summary", "exports", "detail", "value", "j_recipe", "j_preset", "j_settings",
+    "request", "report",
 }
 
 

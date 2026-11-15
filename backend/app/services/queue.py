@@ -59,6 +59,11 @@ class Coordinator:
             self._threads.append(t)
         for a in self.db.all("SELECT * FROM assets WHERE status='inspecting'"):
             self.enqueue_prepare(a["id"])
+        # Baselines (frozen display mapping, thumbnails) prepared by an older engine are rebuilt once.
+        for a in self.db.all("SELECT * FROM assets WHERE status IN ('ready','needs_input')"):
+            prepared = a.get("prepared") or {}
+            if prepared.get("label") and prepared.get("engine") != PIPELINE_VERSION:
+                self.enqueue_prepare(a["id"])
 
     def stop(self) -> None:
         self._stop = True
@@ -89,8 +94,11 @@ class Coordinator:
         t = now()
         self.db.execute("UPDATE job_items SET state='interrupted', finished_at=? WHERE state IN ('running','queued')", (t,))
         self.db.execute("UPDATE jobs SET state='interrupted', updated_at=? WHERE state IN ('running','queued')", (t,))
+        self.db.execute("UPDATE stacks SET state='interrupted', stage=NULL, updated_at=?, finished_at=? WHERE state IN ('running','queued')", (t, t))
         for p in self.cfg.runs_dir.glob("*.partial"):
             shutil.rmtree(p, ignore_errors=True)
+        for p in self.cfg.tmp_dir.glob("stack_*.fits"):
+            p.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------ small tasks (futures)
     def run_task(self, kind: str, payload: dict[str, Any]) -> Future:
@@ -133,7 +141,107 @@ class Coordinator:
             self.db.update("assets", asset_id, {"status": "failed", "error": {"code": intake.get("code", "UNSUPPORTED"), "message": intake["message"]}})
             return
         prepared = res.get("meta") or {"hdu_thumbs": res.get("hdu_thumbs", {})}
-        self.db.update("assets", asset_id, {"status": intake["status"], "prepared": prepared, "error": None})
+        values: dict[str, Any] = {"status": intake["status"], "prepared": prepared, "error": None}
+        old = (self.db.one("SELECT prepared FROM assets WHERE id=?", (asset_id,)) or {}).get("prepared") or {}
+        if old.get("orientation_transform") and prepared.get("orientation_transform") and old["orientation_transform"] != prepared["orientation_transform"]:
+            # The display orientation changed (engine update): per-asset rectangles would point at the wrong pixels.
+            values.update(regions=[], background=None)
+        self.db.update("assets", asset_id, values)
+        if intake["status"] == "ready":
+            self._auto_enhance_stack(asset_id)
+
+    # ------------------------------------------------------------------ stacks
+    def _auto_enhance_stack(self, asset_id: str) -> None:
+        """A stack created with "Enhance automatically" gets one enhancement job once its result is ready."""
+        stk = self.db.one("SELECT * FROM stacks WHERE asset_id=? AND auto_enhance=1 AND job_id IS NULL", (asset_id,))
+        if not stk or not stk.get("recipe"):
+            return
+        job_id = new_id("job_")
+        t = now()
+        with self.db.transaction():
+            self.db.insert("jobs", {
+                "id": job_id, "request_key": f"stack:{stk['id']}", "created_at": t, "updated_at": t, "state": "queued",
+                "recipe": stk["recipe"], "preset_snapshot": stk["preset_snapshot"], "settings_snapshot": stk["settings_snapshot"], "force": 0,
+            })
+            self.db.insert("job_items", {"id": new_id("it_"), "job_id": job_id, "asset_id": asset_id, "position": 0, "state": "queued"})
+            self.db.update("stacks", stk["id"], {"job_id": job_id, "updated_at": t})
+        self.wake()
+
+    def cancel_stack(self, stack_id: str) -> bool:
+        stk = self.db.one("SELECT state FROM stacks WHERE id=?", (stack_id,))
+        if not stk:
+            return False
+        if stk["state"] == "queued":
+            self.db.update("stacks", stack_id, {"state": "cancelled", "stage": None, "updated_at": now(), "finished_at": now()})
+        cur = self._current
+        if cur and cur["kind"] == "stack" and cur["stack_id"] == stack_id:
+            self._cancel.set()
+        self.wake()
+        return True
+
+    def retry_stack(self, stack_id: str) -> None:
+        self.db.execute("UPDATE stacks SET state='queued', stage=NULL, progress=NULL, error=NULL, finished_at=NULL, updated_at=? "
+                        "WHERE id=? AND state IN ('interrupted','failed','cancelled')", (now(), stack_id))
+        self.wake()
+
+    def _next_stack(self) -> dict[str, Any] | None:
+        return self.db.one("SELECT * FROM stacks WHERE state='queued' ORDER BY created_at LIMIT 1")
+
+    def _start_stack(self, stk: dict[str, Any]) -> None:
+        task = {
+            "task_id": new_id("t_"), "kind": "stack", "stack_id": stk["id"], "request": stk["request"],
+            "out_path": str(self.cfg.tmp_dir / f"stack_{stk['id']}.fits"), "settings": stk["settings_snapshot"] or {},
+        }
+        self.db.update("stacks", stk["id"], {"state": "running", "stage": "Starting", "progress": 0.0, "started_at": now(), "updated_at": now()})
+        cur = {"task": task, "kind": "stack", "stack_id": stk["id"], "task_id": task["task_id"], "future": None}
+        with self._cond:
+            self._dispatch(cur)
+
+    def _finish_stack(self, stack_id: str, kind: str, payload: Any) -> None:
+        self.live.pop(stack_id, None)
+        t = now()
+        if kind == "cancelled":
+            self.db.update("stacks", stack_id, {"state": "cancelled", "stage": None, "updated_at": t, "finished_at": t})
+            return
+        if kind != "done":
+            self.db.update("stacks", stack_id, {"state": "failed", "stage": None, "error": payload, "updated_at": t, "finished_at": t})
+            return
+        stk = self.db.one("SELECT * FROM stacks WHERE id=?", (stack_id,)) or {}
+        try:
+            asset_id = self._add_stack_asset(stk, payload)
+        except Exception as exc:
+            Path(payload["path"]).unlink(missing_ok=True)
+            self.db.update("stacks", stack_id, {"state": "failed", "stage": None, "updated_at": t, "finished_at": t,
+                                                "error": {"code": "STACK_SAVE_FAILED", "message": "The stacked image could not be added to the app.", "detail": str(exc)}})
+            return
+        self.db.update("stacks", stack_id, {"state": "succeeded", "stage": None, "progress": 1.0, "report": payload["report"],
+                                            "asset_id": asset_id, "updated_at": t, "finished_at": t})
+
+    def _add_stack_asset(self, stk: dict[str, Any], payload: dict[str, Any]) -> str:
+        import stat
+
+        from ..processing.readers import evaluate_intake, inspect_file
+
+        asset_id = new_id("a_")
+        asset_dir = self.cfg.assets_dir / asset_id
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        final = asset_dir / "original.fits"
+        shutil.move(payload["path"], final)
+        final.chmod(stat.S_IREAD)  # originals are immutable
+        rep = payload["report"]
+        filename = f"{stk.get('name') or 'Stack'} - stacked {rep['frames_used']} frames.fits"
+        inspection = inspect_file(final, self.cfg.max_pixels)
+        interpretation = {"state": "linear"}  # our own stacks are linear by construction
+        intake = evaluate_intake(inspection, interpretation)
+        row = {
+            "id": asset_id, "created_at": now(), "filename": filename, "format": "fits", "size_bytes": payload["size"], "sha256": payload["sha256"],
+            "status": "inspecting" if intake["status"] != "unsupported" else "failed", "error": None, "inspection": inspection,
+            "interpretation": interpretation, "regions": [], "original_name": final.name,
+        }
+        self.db.insert("assets", row)
+        if row["status"] == "inspecting":
+            self.enqueue_prepare(asset_id)
+        return asset_id
 
     # ------------------------------------------------------------------ jobs
     def wake(self) -> None:
@@ -184,8 +292,22 @@ class Coordinator:
             "background": bg if bg and bg.get("confirmed") else None,
             "frame": (asset.get("prepared") or {}).get("frame"), "backend": planned_backend, "precision": "float32",
             "strip_location": bool(settings.get("strip_location", True)),
+            "ai_models": self.ai_model_state(recipe, asset),
         }
         return hashlib.sha256(json.dumps(material, sort_keys=True, default=str).encode()).hexdigest()
+
+    def ai_model_state(self, recipe: dict[str, Any], asset: dict[str, Any]) -> dict[str, str | None]:
+        """Which AI model file each enabled AI tool would use (a later download must not reuse a run that skipped it)."""
+        from ..processing.ai import registry
+
+        ai = (recipe.get("ai") or {})
+        rgb = ((asset.get("prepared") or {}).get("channel_layout") or (asset.get("inspection") or {}).get("channel_layout")) != "mono"
+        out: dict[str, str | None] = {}
+        for tool, ids in registry.TOOL_MODELS.items():
+            if ai.get(tool):
+                spec = registry.MODELS[ids[0] if (tool != "stars" or rgb) else ids[-1]]
+                out[tool] = spec.sha256 if registry.installed(self.cfg.ai_models_dir, spec) else None
+        return out
 
     def planned_backend(self, settings: dict[str, Any], asset: dict[str, Any]) -> str:
         prepared = asset.get("prepared") or {}
@@ -200,12 +322,12 @@ class Coordinator:
     # ------------------------------------------------------------------ scheduling
     def _next_item(self) -> dict[str, Any] | None:
         return self.db.one(
-            "SELECT i.*, j.recipe AS j_recipe, j.preset_snapshot AS j_preset, j.settings_snapshot AS j_settings, j.force AS j_force "
-            "FROM job_items i JOIN jobs j ON j.id=i.job_id WHERE i.state='queued' ORDER BY j.created_at, i.position LIMIT 1"
+            "SELECT i.*, j.recipe AS j_recipe, j.preset_snapshot AS j_preset, j.settings_snapshot AS j_settings, j.force AS j_force, "
+            "j.created_at AS j_created FROM job_items i JOIN jobs j ON j.id=i.job_id WHERE i.state='queued' ORDER BY j.created_at, i.position LIMIT 1"
         )
 
     def _has_work(self) -> bool:
-        return bool(self._small) or self._next_item() is not None
+        return bool(self._small) or self._next_item() is not None or self._next_stack() is not None
 
     def _scheduler_loop(self) -> None:
         while not self._stop:
@@ -218,7 +340,14 @@ class Coordinator:
                     task, fut = self._small.pop(0)
                     self._dispatch({"task": task, "kind": task["kind"], "future": fut, "task_id": task["task_id"]})
                     continue
-            item = self._next_item()
+            item, stk = self._next_item(), self._next_stack()
+            if stk is not None and (item is None or stk["created_at"] <= item["j_created"]):
+                try:
+                    self._start_stack(stk)
+                except Exception as exc:
+                    self.db.update("stacks", stk["id"], {"state": "failed", "stage": None, "updated_at": now(),
+                                                         "error": {"code": "INTERNAL_ERROR", "message": "Stacking could not be started.", "detail": str(exc)}})
+                continue
             if item is None:
                 continue
             try:
@@ -299,6 +428,9 @@ class Coordinator:
         if cur is None or cur["task_id"] != task_id:
             return
         if kind == "progress":
+            if cur["kind"] == "stack":
+                self.live[cur["stack_id"]] = {"stage": payload.get("stage"), "progress": payload.get("fraction")}
+                self.db.update("stacks", cur["stack_id"], {"stage": payload.get("stage"), "progress": payload.get("fraction"), "updated_at": now()})
             if cur["kind"] == "enhance":
                 live = self.live.setdefault(cur["item_id"], {})
                 if "stage" in payload:
@@ -314,6 +446,9 @@ class Coordinator:
         with self._cond:
             self._current = None
             self._cond.notify_all()
+        if cur["kind"] == "stack":
+            self._finish_stack(cur["stack_id"], kind, payload)
+            return
         if cur["kind"] != "enhance":
             fut: Future = cur["future"]
             if kind == "done":

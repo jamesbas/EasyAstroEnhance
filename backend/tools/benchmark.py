@@ -63,7 +63,7 @@ def timed_run(img, recipe, device, available):
     t0 = time.perf_counter()
     res = run_pipeline(img, recipe, AssetContext(), ExecutionOptions(device=device, gpu_available=available, gpu_threshold_pixels=0))
     total = time.perf_counter() - t0
-    group = next(t["seconds"] for t in res.report["stage_timings"] if t["stage"] == "pixel group")
+    group = sum(t["seconds"] for t in res.report["stage_timings"] if t["stage"].startswith("pixel group"))
     return total, group, res.report["execution"]
 
 
@@ -74,7 +74,7 @@ def main() -> None:
     args = ap.parse_args()
     info = probe_cuda()
     gpu = bool(info["ok"])
-    recipe = Recipe(**{**builtin_presets()["brighter-detail"].model_dump(), "local_contrast": {"enabled": True, "strength": "gentle"}})
+    recipe = builtin_presets()["vivid"]
     proc = psutil.Process()
     rows, cold = [], None
     for label, h, w in SIZES:

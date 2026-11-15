@@ -46,6 +46,10 @@ def default_recipe(client, preset="natural"):
 
 
 def test_security_rejects_bad_host_origin_and_token(client):
+    from app.processing.recipe import PIPELINE_VERSION, RECIPE_SCHEMA_VERSION
+
+    s = client.get("/api/v1/session").json()
+    assert s["version"] == PIPELINE_VERSION and s["recipe_schema"] == RECIPE_SCHEMA_VERSION and s["stack_version"]  # shown in the UI header and Settings
     assert client.get("/api/v1/health", headers={"Host": "evil.example:8765"}).status_code == 400
     assert client.get("/api/v1/health", headers={"Origin": "http://evil.example"}).status_code == 403
     r = client.post("/api/v1/presets", json={"name": "x", "recipe": {}}, headers={"X-EAE-Token": "wrong"})
@@ -131,7 +135,7 @@ def test_real_jpeg_vertical_slice(client):
         pytest.skip("real JPEG not present in samplepics/")
     a = ready(client, upload(client, p)["id"])
     assert a["status"] == "ready" and (a["width"], a["height"]) == (1080, 1080)
-    job = run_job(client, [a["id"]], default_recipe(client, "brighter-detail"))
+    job = run_job(client, [a["id"]], default_recipe(client, "vivid"))
     item = job["items"][0]
     assert item["state"] in ("succeeded", "succeeded_with_notes"), item.get("error")
     png = client.get(f"/api/v1/runs/{item['run_id']}/exports/png").content

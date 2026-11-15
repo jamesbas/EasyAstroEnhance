@@ -3,12 +3,28 @@
 export type Strength = 'gentle' | 'balanced' | 'strong';
 export type BackgroundMethod = 'constant' | 'planar';
 
-export interface Switch {
-  enabled: boolean;
-  strength: Strength;
+// Main sliders (0 switches a finishing stage off). Mirrors LookRecipe.
+export interface LookRecipe {
+  background: number;
+  stretch: number;
+  contrast: number;
+  color: number;
+  detail: number;
+  noise: number;
+  protect_cores: boolean;
 }
 
-export interface ToneRecipe extends Switch {
+// Automatic stages; each measures the image and runs or is skipped with a reason. Mirrors AutoRecipe.
+export interface AutoRecipe {
+  neutralize: boolean;
+  gradient: boolean;
+  white_balance: boolean;
+  green_removal: boolean;
+  star_stretch: boolean;
+}
+
+export interface ToneRecipe {
+  enabled: boolean;
   brightness_ev: number;
   shadows: number;
   highlights: number;
@@ -22,27 +38,40 @@ export interface BackgroundRecipe {
 }
 
 export interface AdvancedRecipe {
-  denoise_amount: number | null;
+  stretch_log_d: number | null;
+  stretch_b: number | null;
+  highlight_convergence: number | null;
+  star_stretch_amount: number | null;
+  hdr_amount: number | null;
+  white_balance_limit: number | null;
+  gradient_degree: number | null;
+  scnr_amount: number | null;
+  denoise_scales: number | null;
+  detail_scale_px: number | null;
   tone_gain: number | null;
-  asinh_k: number | null;
-  saturation: number | null;
-  star_protection_amount: number | null;
-  local_contrast_amount: number | null;
-  local_contrast_scale_px: number | null;
   background_strength: number | null;
+  deconvolution: boolean;
+  deconvolution_iterations: number | null;
 }
+
+// Optional learned (AI) tools, all off by default. Mirrors AIRecipe.
+export interface AIRecipe {
+  background: boolean;
+  denoise: boolean;
+  stars: boolean;
+}
+export type AITool = keyof AIRecipe;
 
 export interface Recipe {
   schema_version: number;
   preset: string;
-  denoise: Switch;
+  look: LookRecipe;
+  auto: AutoRecipe;
   tone: ToneRecipe;
-  star_protection: Switch;
-  local_contrast: Switch;
-  color: Switch;
   background: BackgroundRecipe;
   protect_regions: boolean;
   advanced: AdvancedRecipe;
+  ai: AIRecipe;
 }
 
 export interface Rect {
@@ -62,6 +91,8 @@ export interface ApiErrorBody {
 export interface Session {
   token: string;
   version: string;
+  recipe_schema: number;
+  stack_version: string;
   limits: { max_files: number; max_file_mib: number; max_megapixels: number };
 }
 
@@ -171,6 +202,7 @@ export interface Asset {
   latest_item: JobItem | null;
   latest_run: Run | null;
   run_count: number;
+  stack: AssetStackInfo | null;
   created_at: string;
 }
 
@@ -272,6 +304,108 @@ export interface JobCreated extends Job {
 
 export interface JobList {
   jobs: Job[];
+}
+
+// ---- stacking
+export type StackMode = 'auto' | 'subs' | 'sessions';
+export type StackGrading = 'off' | 'lenient' | 'standard' | 'strict';
+
+export interface StackFolders {
+  folder: string;
+  mode?: StackMode;
+  darks?: string | null;
+  flats?: string | null;
+  bias?: string | null;
+  darkflats?: string | null;
+}
+
+export interface StackCreateBody extends StackFolders {
+  request_key: string;
+  scale: 1 | 2;
+  grading: StackGrading;
+  rejection: 'sigma' | 'none';
+  auto_enhance: boolean;
+  recipe: Recipe | null;
+  preset_id: string | null;
+}
+
+export interface FrameSummary {
+  count: number;
+  layout?: 'cfa' | 'mono' | 'rgb';
+  width?: number;
+  height?: number;
+  bayer?: string | null;
+  filter?: string | null;
+  instrument?: string | null;
+  exposures?: number[];
+  total_exposure_s?: number | null;
+  sub_frames?: number;
+  nights?: string[];
+}
+
+export interface NamedReason {
+  name: string;
+  reason: string;
+}
+
+export interface StackPlan {
+  name: string;
+  mode: 'subs' | 'sessions';
+  lights: FrameSummary;
+  excluded: NamedReason[];
+  skipped: NamedReason[];
+  calibration: { dark: number; flat: number; bias: number; darkflat: number } | null;
+  warnings: string[];
+  can_stack: boolean;
+  drizzle_available: boolean;
+  output?: { native: [number, number]; drizzle2x: [number, number] | null };
+}
+
+export interface StackReport {
+  mode: 'subs' | 'sessions';
+  frames_used: number;
+  frames_total: number;
+  rejected_frames: NamedReason[];
+  seconds: number;
+  device?: string;
+  output?: { width: number; height: number };
+  [key: string]: unknown;
+}
+
+export interface Stack {
+  id: string;
+  name: string;
+  state: RunState;
+  status_label: string;
+  created_at: string;
+  finished_at: string | null;
+  stage: string | null;
+  progress: number | null;
+  request: StackFolders & { scale: number; grading: StackGrading };
+  auto_enhance: boolean;
+  job_id: string | null;
+  asset_id: string | null;
+  asset_status: string | null;
+  report: StackReport | null;
+  error: ApiErrorBody | null;
+}
+
+export interface StackList {
+  stacks: Stack[];
+}
+
+export interface AssetStackInfo {
+  id: string;
+  name: string;
+  mode: 'subs' | 'sessions';
+  frames_used: number;
+  frames_total: number;
+  rejected_frames: NamedReason[];
+  total_exposure_s: number | null;
+  drizzle: boolean;
+  seconds: number;
+  calibration: { darks: number; flats: number; bias: number; dark_flats: number };
+  defective_pixels: number | null;
 }
 
 export interface JobCreateBody {
@@ -417,4 +551,42 @@ export interface ExportStatus {
   state: 'building' | 'ready' | 'failed';
   detail: { done?: number; total?: number; bytes?: number; error?: ApiErrorBody } | null;
   download_url: string | null;
+}
+
+// ---- AI models
+export type AIModelState = 'installed' | 'missing' | 'downloading' | 'error';
+
+export interface AIModelInfo {
+  id: string;
+  tool: AITool;
+  title: string;
+  file: string;
+  version: string;
+  url: string;
+  sha256: string;
+  size: number;
+  license: string;
+  license_url: string;
+  attribution: string;
+  source: string;
+  state: AIModelState;
+  received: number;
+  error: string | null;
+  local_graxpert_copy: boolean;
+}
+
+export interface AIToolInfo {
+  models: string[];
+  ready: boolean;
+  state: AIModelState;
+  download_bytes: number;
+}
+
+export interface AIOverview {
+  models: AIModelInfo[];
+  tools: Record<AITool, AIToolInfo>;
+  runtime_available: boolean;
+  provider_label: string | null;
+  models_dir: string;
+  note: string;
 }

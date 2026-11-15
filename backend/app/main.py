@@ -11,11 +11,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .api import assets, jobs, presets, runs, settings
+from .api import ai, assets, jobs, presets, runs, settings, stacks
 from .config import Config, ensure_dirs, load_config
 from .db import Database
-from .processing.recipe import PIPELINE_VERSION
+from .processing.recipe import PIPELINE_VERSION, RECIPE_SCHEMA_VERSION
+from .processing.stacking.stack import STACK_VERSION
 from .security import SecurityMiddleware
+from .services.ai_models import ModelManager
 from .services.queue import Coordinator
 
 
@@ -30,6 +32,7 @@ def create_app(cfg: Config | None = None, start_worker: bool = True) -> FastAPI:
         presets.seed_builtin_presets(db)
         coordinator = Coordinator(cfg, db)
         app.state.cfg, app.state.db, app.state.coordinator = cfg, db, coordinator
+        app.state.ai_models = ModelManager(cfg.ai_models_dir, cfg.min_free_bytes)
         if start_worker:
             coordinator.start()
         yield
@@ -55,12 +58,12 @@ def create_app(cfg: Config | None = None, start_worker: bool = True) -> FastAPI:
         )
 
     prefix = "/api/v1"
-    for r in (assets.router, jobs.router, presets.router, runs.router, settings.router):
+    for r in (ai.router, assets.router, jobs.router, presets.router, runs.router, settings.router, stacks.router):
         app.include_router(r, prefix=prefix)
 
     @app.get(f"{prefix}/session")
     async def session() -> dict[str, Any]:
-        return {"token": token, "version": PIPELINE_VERSION, "limits": {"max_files": cfg.max_files, "max_file_mib": cfg.max_file_bytes // (1024 * 1024), "max_megapixels": cfg.max_pixels // 1_000_000}}
+        return {"token": token, "version": PIPELINE_VERSION, "recipe_schema": RECIPE_SCHEMA_VERSION, "stack_version": STACK_VERSION, "limits": {"max_files": cfg.max_files, "max_file_mib": cfg.max_file_bytes // (1024 * 1024), "max_megapixels": cfg.max_pixels // 1_000_000}}
 
     @app.get(f"{prefix}/health")
     async def health() -> dict[str, Any]:

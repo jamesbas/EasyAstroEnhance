@@ -172,7 +172,9 @@ def write_fits(
         h["EAEUNIT"] = (bunit[:60], "original BUNIT")
     h.add_history(f"EasyAstroEnhance {PIPELINE_VERSION} {kind}.")
     if kind == "processed-linear":
-        h.add_history("Contains only background correction and denoising; no stretch, tone, local contrast, saturation or star protection.")
+        h.add_history("Contains only linear operations: background/gradient correction, per-channel sky offsets,")
+        h.add_history("bounded white-balance gains, optional deconvolution and denoising. No stretch, tone,")
+        h.add_history("contrast, saturation or star stretch. Exact values are in processing.json.")
     else:
         h.add_history("Display-processed values (tone/contrast/color applied); not linear data.")
     if strip_sensitive:

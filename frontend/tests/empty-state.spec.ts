@@ -18,6 +18,7 @@ test.describe('empty state', () => {
     const input = page.getByTestId('file-input');
     await expect(input).toHaveAttribute('multiple', '');
     await expect(input).toHaveAttribute('accept', '.jpg,.jpeg,.tif,.tiff,.fit,.fits,.fts');
+    await expect(page.getByTestId('app-version')).toHaveText(/^v\d+\.\d+\.\d+$/);  // visible before any file is added
     expect(errors).toEqual([]);
   });
 
@@ -34,6 +35,10 @@ test.describe('empty state', () => {
     await page.getByTestId('check-gpu').click();
     await expect(page.getByTestId('probe-details')).toBeVisible({ timeout: 60_000 });
     await expect(dialog.getByText('Remove location/observer details from shared exports')).toBeVisible();
+    const shown = await page.getByTestId('app-version').innerText();
+    await expect(page.getByTestId('about-version')).toHaveText(shown);
+    await expect(page.getByTestId('about-section')).toContainText('recipe schema');
+    await expect(page.getByTestId('about-section')).toContainText(/stacking \d+\.\d+\.\d+/);
     await select.selectOption('auto');
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden();

@@ -23,8 +23,8 @@ def big_jpeg(tmp_path, name, h=1400, w=2000, seed=0):
 
 
 def heavy_recipe(client, device="cpu"):
-    r = default_recipe(client, "brighter-detail")
-    r["local_contrast"] = {"enabled": True, "strength": "balanced"}
+    r = default_recipe(client, "vivid")
+    r["look"] = {**r["look"], "detail": 0.8}
     return r
 
 

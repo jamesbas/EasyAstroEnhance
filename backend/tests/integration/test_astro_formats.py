@@ -19,10 +19,20 @@ from PIL import Image
 
 from app.processing.pipeline import AssetContext, ExecutionOptions, run_pipeline
 from app.processing.recipe import (
-    BackgroundRecipe, Recipe, Switch, ToneRecipe, builtin_presets, no_operations_recipe,
+    AutoRecipe, LookRecipe, Recipe, ToneRecipe, builtin_presets, no_operations_recipe,
 )
 from conftest import linear_field, make_image, real_file, synthetic_field, write_jpeg
 from integration.test_jpeg_slice import default_recipe, ready, run_job, upload
+
+NOOP = no_operations_recipe()
+
+
+def recipe(**kw) -> Recipe:
+    return NOOP.model_copy(update=kw)
+
+
+def look(**kw) -> LookRecipe:
+    return NOOP.look.model_copy(update=kw)
 
 
 def run(img, recipe, ctx=None, **kw):
@@ -35,9 +45,9 @@ def lin_img(arr):
 
 def all_display_ops():
     return Recipe(
-        preset="custom", denoise=Switch(strength="balanced"),
-        tone=ToneRecipe(enabled=True, strength="strong", brightness_ev=0.4, shadows=0.5, highlights=-0.3, black_point=0.01),
-        star_protection=Switch(strength="strong"), local_contrast=Switch(strength="balanced"), color=Switch(strength="strong"),
+        preset="custom", look=LookRecipe(contrast=0.6, color=0.8, detail=0.6, noise=0.6, protect_cores=True),
+        auto=AutoRecipe(neutralize=False, gradient=False, white_balance=False, green_removal=True, star_stretch=True),
+        tone=ToneRecipe(enabled=True, brightness_ev=0.4, shadows=0.5, highlights=-0.3, black_point=0.01),
     )
 
 
@@ -45,10 +55,10 @@ def all_display_ops():
 def test_processed_linear_excludes_all_display_only_operations():
     lin = linear_field(h=150, w=190, seed=3)
     img = lin_img(lin)
-    denoise_only = Recipe(preset="custom", denoise=Switch(strength="balanced"), tone=ToneRecipe(enabled=False), star_protection=Switch(enabled=False), local_contrast=Switch(enabled=False), color=Switch(enabled=False))
+    denoise_only = recipe(look=look(noise=0.6))
     a = run(img, denoise_only)
     b = run(img, all_display_ops())
-    assert np.array_equal(a.processed, b.processed)  # tone/contrast/saturation/star-protection never touch the linear array
+    assert np.array_equal(a.processed, b.processed)  # stretch/contrast/saturation/star stretch never touch the linear array
     assert not np.array_equal(a.display, b.display)
     assert not np.array_equal(a.processed, lin) and np.abs(a.processed - lin).max() > 0  # denoise did change it
     assert b.report["mode"] == "linear"
@@ -62,21 +72,25 @@ def test_linear_no_operations_returns_source_array_and_baseline_display():
     assert res.display.dtype == np.float32 and res.display.max() <= 1.0
 
 
-def test_linear_display_is_frozen_baseline_when_tone_disabled_and_stretch_differs_when_enabled():
+def test_linear_display_is_frozen_baseline_when_tone_disabled_and_stretch_lands_sky_on_target():
     lin = linear_field(h=120, w=150, seed=5)
     img = lin_img(lin)
-    off = run(img, Recipe(preset="c", denoise=Switch(enabled=False), tone=ToneRecipe(enabled=False), star_protection=Switch(enabled=False), color=Switch(enabled=False)))
-    on = run(img, Recipe(preset="c", denoise=Switch(enabled=False), tone=ToneRecipe(enabled=True, strength="strong"), star_protection=Switch(enabled=False), color=Switch(enabled=False)))
+    off = run(img, recipe(tone=ToneRecipe(enabled=False)))
+    on = run(img, recipe(tone=ToneRecipe(enabled=True), look=look(background=0.12)))
     assert np.array_equal(off.display, off.baseline)
-    assert np.median(on.display) > np.median(off.display)  # faint detail brightened by the separate linear stretch
-    assert on.report["enhanced_frame"] is not None and on.report["baseline_frame"]["k"] == 8.0
+    assert not np.array_equal(on.display, off.display)
+    assert on.report["enhanced_frame"] is not None
+    bf = on.report["baseline_frame"]
+    assert bf["version"] == 2 and bf["target"] == pytest.approx(0.15)
+    sky = np.median(on.display[:20, :20].mean(-1))
+    assert sky == pytest.approx(0.12, abs=0.03)  # the MTF places the sky at the requested level
     assert np.array_equal(on.display_fixed, on.baseline)  # fixed-mapping diagnostic == frozen baseline when processed==source
 
 
 def test_linear_scale_aware_noise_estimate_in_any_units():
     base = linear_field(h=140, w=160, seed=6)
     for unit in (1e-6, 1.0, 1e6):
-        res = run(lin_img(base * np.float32(unit)), Recipe(preset="c", denoise=Switch(strength="strong"), tone=ToneRecipe(enabled=False), star_protection=Switch(enabled=False), color=Switch(enabled=False)))
+        res = run(lin_img(base * np.float32(unit)), recipe(look=look(noise=1.0)))
         out = res.processed / unit
         from scipy import ndimage
 
@@ -93,7 +107,7 @@ def test_linear_denoise_keeps_faint_flux_and_position():
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
     clean = 500 + 40 * np.exp(-(((xx - 64.4) ** 2 + (yy - 70.2) ** 2) / (2 * 3.0**2)))
     noisy = (clean + rng.normal(0, 15, clean.shape)).astype(np.float32)
-    res = run(lin_img(noisy), Recipe(preset="c", denoise=Switch(strength="balanced"), tone=ToneRecipe(enabled=False), star_protection=Switch(enabled=False), color=Switch(enabled=False)))
+    res = run(lin_img(noisy), recipe(look=look(noise=0.6)))
     fp = np.hypot(yy - 70.2, xx - 64.4) < 9
     before, after = (noisy - 500)[fp].sum(), (res.processed - 500)[fp].sum()
     assert abs(after - before) / before < 0.1
@@ -107,7 +121,7 @@ def test_linear_protected_pixels_untouched_and_use_baseline_display():
     lin = linear_field(h=140, w=180, seed=8)
     img = lin_img(lin)
     region = [{"x": 0, "y": 120, "w": 180, "h": 20}]
-    res = run(img, builtin_presets()["brighter-detail"], AssetContext(regions=region))
+    res = run(img, builtin_presets()["vivid"], AssetContext(regions=region))
     assert np.array_equal(res.processed[120:], lin[120:])  # untouched in the linear output
     assert np.array_equal(res.display[120:], res.baseline[120:])  # source's baseline rendering in output
 
@@ -272,7 +286,13 @@ def test_real_scaled_fits_end_to_end(client):
         assert h["CTYPE1"] == "RA---SIN" and h["CRVAL1"] == orig[0].header["CRVAL1"] and h["CDELT2"] == orig[0].header["CDELT2"]
         assert np.array_equal(np.isnan(out[0].data.reshape(619, 435)), np.isnan(src)) and np.isnan(src).sum() == 82307  # BLANK mask preserved exactly
         assert 1.0 < np.nanmean(out[0].data) < 110.0  # physical Kelvin-scale values, not 0..1 display values
-        assert abs(np.nanmean(out[0].data) - np.nanmean(src)) < 0.05 * abs(np.nanmean(src))
+        rep = client.get(f"/api/v1/runs/{run['id']}/exports/report").json()["applied"]
+        neut = next(o for o in rep["operations"] if o["name"] == "neutralize")
+        scale = rep["source"]["normalization"]["scale"]
+        shift = 0.0
+        if neut["status"] == "applied":  # recorded sky offset and pedestal: the processed-linear data is reversible
+            shift = (neut["parameters"]["sky_per_channel"][0] - neut["parameters"]["pedestal"]) * scale
+        assert abs(np.nanmean(out[0].data) + shift - np.nanmean(src)) < 0.05 * abs(np.nanmean(src)) + 1e-6
     assert hashlib.sha256(p.read_bytes()).hexdigest() == before
     # a no-operations run reproduces the physical values to float32 precision
     j2 = run_job(client, [a["id"]], no_operations_recipe().model_dump(), key="real-fits-noop")

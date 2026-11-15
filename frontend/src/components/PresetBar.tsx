@@ -3,7 +3,15 @@ import type { FormEvent } from 'react';
 import { api } from '../api/client';
 import type { Preset } from '../api/types';
 import { useToasts } from '../hooks/useToasts';
+import { PRESET_DESCRIPTIONS } from '../lib/recipe';
 import { Modal } from './Modal';
+
+// Built-in presets in the order they should be offered (the API lists them alphabetically).
+const BUILTIN_ORDER = ['natural', 'vivid', 'faint-detail', 'bright-core', 'star-field', 'seestar-match'];
+const order = (id: string) => {
+  const i = BUILTIN_ORDER.indexOf(id);
+  return i < 0 ? BUILTIN_ORDER.length : i;
+};
 
 interface PresetBarProps {
   presets: Preset[];
@@ -113,7 +121,7 @@ function ManagePopover({ presets, activeId, onChanged, onDeleted }: { presets: P
 
 export function PresetBar(props: PresetBarProps) {
   const [saving, setSaving] = useState(false);
-  const builtin = props.presets.filter((p) => p.builtin);
+  const builtin = props.presets.filter((p) => p.builtin).sort((a, b) => order(a.id) - order(b.id));
   const user = props.presets.filter((p) => !p.builtin);
   const current = props.presets.find((p) => p.id === props.presetId);
 
@@ -149,7 +157,7 @@ export function PresetBar(props: PresetBarProps) {
       {props.presets.filter((p) => !p.compatible).map((p) => (
         <p key={p.id} className="muted small warn-text">{p.name}: {p.migration_note}</p>
       ))}
-      {current?.builtin && <p className="muted small">Both named presets use conservative noise reduction.</p>}
+      {current?.builtin && PRESET_DESCRIPTIONS[current.id] && <p className="muted small" data-testid="preset-description">{PRESET_DESCRIPTIONS[current.id]}</p>}
       <details className="manage">
         <summary>Manage presets</summary>
         <ManagePopover presets={props.presets} activeId={props.presetId} onChanged={props.onChanged} onDeleted={(id) => { if (id === props.presetId) props.onSelect('custom'); }} />

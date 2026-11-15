@@ -5,6 +5,7 @@ The worker never opens the SQLite database; it exchanges bounded messages with t
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -22,7 +23,7 @@ from ..processing import export as exp
 from ..processing.backends import BackendUnavailable, get_backend, probe_cuda
 from ..processing.denoise import estimate_noise
 from ..processing.imagedata import Cancelled, ImageData, ProcessingError
-from ..processing.linear import LinearFrame, fixed_map, to_normalized
+from ..processing.stretch import LinearFrame, fixed_map, to_normalized
 from ..processing.masks import regions_mask, validate_regions
 from ..processing.pipeline import (
     AssetContext, ExecutionOptions, baseline_display, choose_backend, estimate_peak_ram_bytes, prepare_linear_frame, run_pipeline,
@@ -44,7 +45,8 @@ def to_u16(display: np.ndarray) -> np.ndarray:
 
 
 def save_npy(path: Path, arr: np.ndarray) -> None:
-    # On Windows a memory-mapped file that a preview request still holds cannot be rewritten; retry briefly.
+    # On Windows a memory-mapped file that a preview request still holds cannot be rewritten (PermissionError, or
+    # EINVAL "user-mapped section open"); retry briefly.
     last: Exception | None = None
     for _ in range(25):
         try:
@@ -53,7 +55,9 @@ def save_npy(path: Path, arr: np.ndarray) -> None:
             mm.flush()
             del mm
             return
-        except PermissionError as exc:
+        except OSError as exc:
+            if not isinstance(exc, PermissionError) and exc.errno != errno.EINVAL:
+                raise
             last = exc
             time.sleep(0.2)
     raise last  # type: ignore[misc]
@@ -140,6 +144,7 @@ def handle_prepare(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
         "domain": image.domain,
         "state": state,
         "label": baseline_label(intake, insp["format"]),
+        "engine": PIPELINE_VERSION,
         "preview_only": state not in ("linear", "rendered"),
         "frame": frame.to_dict() if frame else None,
         "histogram": luminance_histogram(base, image.valid_mask),
@@ -163,7 +168,7 @@ def _work_and_weight(image: ImageData, frame: dict[str, Any] | None, regions: li
     prot = regions_mask(regs, w, h) if regs else np.zeros((h, w), dtype=bool)
     weight = image.valid_mask & ~prot
     if image.domain == "linear":
-        fr = LinearFrame.from_dict(frame) if frame else prepare_linear_frame(image)
+        fr = LinearFrame.from_dict(frame) or prepare_linear_frame(image)
         work = to_normalized(image.pixels, fr.offset, fr.scale)
     else:
         fr = None
@@ -286,6 +291,35 @@ def _write_summary(path: Path, run: dict[str, Any], report: dict[str, Any]) -> N
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _linear_history(report: dict[str, Any]) -> list[str]:
+    """Short FITS HISTORY lines describing the linear operations (exact values live in processing.json)."""
+    ops = {o["name"]: o for o in report.get("operations", [])}
+    scale = ((report.get("source") or {}).get("normalization") or {}).get("scale") or 1.0
+    lines: list[str] = []
+    if (ops.get("gradient") or {}).get("status") == "applied":
+        lines.append("Automatic polynomial gradient model subtracted.")
+    n = ops.get("neutralize") or {}
+    if n.get("status") == "applied" and n.get("parameters"):
+        sky = n["parameters"].get("sky_per_channel") or []
+        ped = n["parameters"].get("pedestal") or 0.0
+        lines.append("Sky offsets (source units): " + ", ".join(f"{v * scale:.2f}" for v in sky))
+        lines.append(f"Shared pedestal added (source units): {ped * scale:.2f}")
+    wbop = ops.get("white_balance") or {}
+    if wbop.get("status") == "applied" and wbop.get("parameters"):
+        f = wbop["parameters"].get("factors_rgb") or []
+        lines.append("White-balance gains R,G,B: " + ", ".join(f"{v:.4f}" for v in f))
+    if (ops.get("deconvolution") or {}).get("status") == "applied":
+        lines.append("Richardson-Lucy deconvolution applied (see processing.json).")
+    if (ops.get("denoise") or {}).get("status") == "applied":
+        lines.append("Wavelet noise reduction applied (see processing.json).")
+    for name, what in (("ai_background", "background model subtracted"), ("ai_denoise", "noise reduction")):
+        op = ops.get(name) or {}
+        if op.get("status") == "applied":
+            m = (op.get("parameters") or {}).get("model") or {}
+            lines.append(f"AI (learned) {what}: {m.get('file')} sha256 {str(m.get('sha256'))[:16]}")
+    return lines
+
+
 def handle_enhance(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
     asset = task["asset"]
     settings = task["settings"]
@@ -351,6 +385,7 @@ def handle_enhance(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
             cancel_check=ctl.check,
             progress=ctl.progress,
             backend_factory=factory,
+            ai_models_dir=cfg.ai_models_dir,
         )
         bg = asset.get("background")
         ctx = AssetContext(
@@ -388,8 +423,9 @@ def handle_enhance(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
         if image.source_format == "fits":
             strip = bool(settings.get("strip_location", True))
             if image.domain == "linear":
+                hist = _linear_history(result.report)
                 put("fits", "processed-linear.fits", "Processed linear FITS (no display-only operations)",
-                    lambda p: exp.write_fits(p, image, result.processed, "processed-linear", recipe.preset, strip))
+                    lambda p: exp.write_fits(p, image, result.processed, "processed-linear", recipe.preset, strip, hist))
             else:
                 put("fits", "display-processed.fits", "Display-processed FITS (not linear data)",
                     lambda p: exp.write_fits(p, image, result.display, "display-processed", recipe.preset, strip))
@@ -485,7 +521,39 @@ class _Ctl:
         self.q.put(("progress", self.task_id, {"label": label}))
 
 
-HANDLERS = {"prepare": handle_prepare, "analysis": handle_analysis, "probe": handle_probe, "enhance": handle_enhance}
+def handle_stack(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
+    """Stack frames from user folders (read-only) into a new linear FITS in the app's temporary folder."""
+    import psutil
+
+    from ..processing.stacking.stack import StackRequest, run_stack
+
+    req = StackRequest(**task["request"])
+    out = Path(task["out_path"])
+    out.parent.mkdir(parents=True, exist_ok=True)
+    partial = out.with_name(out.stem + ".partial.fits")
+    settings = task.get("settings") or {}
+    if shutil.disk_usage(out.parent).free < cfg.min_free_bytes:
+        raise ProcessingError("DISK_FULL", "The disk is nearly full; free some space and try again.")
+    last = {"t": 0.0, "msg": ""}
+
+    def progress(msg: str, frac: float) -> None:
+        ctl.check()
+        t = time.monotonic()
+        if msg != last["msg"] and t - last["t"] > 0.25 or t - last["t"] > 1.0:
+            last.update(t=t, msg=msg)
+            ctl.q.put(("progress", ctl.task_id, {"stage": msg, "fraction": round(float(frac), 3)}))
+
+    budget = int(psutil.virtual_memory().available * float(settings.get("ram_fraction", cfg.ram_fraction)) * 0.5)
+    try:
+        report = run_stack(req, partial, ctl.check, progress, device=settings.get("device", "auto"),
+                           threads=max(1, min(4, (os.cpu_count() or 2) - 1)), memory_budget_bytes=budget)
+        partial.replace(out)
+    finally:
+        partial.unlink(missing_ok=True)
+    return {"report": report, "path": str(out), "sha256": sha256_path(out), "size": out.stat().st_size}
+
+
+HANDLERS = {"prepare": handle_prepare, "analysis": handle_analysis, "probe": handle_probe, "enhance": handle_enhance, "stack": handle_stack}
 
 
 def worker_main(task_q, result_q, cancel_event, cfg: Config) -> None:

@@ -1,15 +1,19 @@
 # EasyAstroEnhance
 
 A small **local** application that enhances telescope photographs (JPEG, TIFF, stacked FITS) with conventional
-numerical image processing. Add files → choose enhancements → **Enhance** → compare before/after → download.
+numerical image processing. Add files → pick a preset → **Enhance** → compare before/after → download.
 
 * Everything runs on your PC (FastAPI on `127.0.0.1` + a React UI). No accounts, no cloud, no API keys.
-* **No generative or learned processing of any kind**: no diffusion/inpainting, no super-resolution, no synthetic
-  stars, no reference photographs of the target. Output pixels derive only from the uploaded pixels.
+* **No generative processing**: no diffusion/inpainting, no super-resolution, no synthetic stars, no reference
+  photographs of the target. Output pixels derive only from the uploaded pixels.
+* **Optional AI tools (off by default):** AI background extraction, AI noise reduction and AI star separation run
+  trained image-restoration networks (GraXpert, Cosmic Clarity Dark Star) locally on your GPU. They are opt-in per run,
+  and every result names the model it used. See "AI tools" below.
 * Originals are immutable (read-only copies, byte-for-byte; every run re-reads the original).
 * Optional NVIDIA GPU acceleration (CuPy) for eligible stages with a complete CPU fallback.
 
-Full specification: [astro-photo-enhancer-app-spec.md](astro-photo-enhancer-app-spec.md).
+Full specification: [astro-photo-enhancer-app-spec.md](astro-photo-enhancer-app-spec.md). Plain-language explanation for
+sharing (e.g. with your processed images): [how-easyastroenhance-works.md](how-easyastroenhance-works.md).
 
 ---------------------------------------------------------------------------------------------------
 
@@ -57,6 +61,9 @@ but the probe fails (“Failed to find CUDA headers”) — the app reports that
 
 Equivalent manual command: `cd backend; uv run --frozen python -m app.serve`. Stop with **Ctrl+C**.
 
+The running version is shown in the top bar (for example `v1.1.0`) and under **Settings → About**; every result's
+`processing.json` also records the engine version that produced it. After updating, restart the app and reload the page.
+
 App data (originals' copies, previews, runs, exports, SQLite database) lives in `%LOCALAPPDATA%\EasyAstroEnhance`
 (override with `-DataDir` / `EASYASTRO_DATA_DIR`). **Settings → Clear local history** lists exactly what it removes; your
 own files elsewhere are never touched. Limits (env overrides): 20 files per batch (`EASYASTRO_MAX_FILES`), 512 MiB per file
@@ -67,17 +74,22 @@ own files elsewhere are never touched. Limits (env overrides): 20 files per batc
 ```powershell
 .\scripts\test.ps1               # backend pytest + frontend type-check
 .\scripts\test.ps1 -E2E          # + Playwright browser tests (temporary server on port 8791, uses Edge)
-.\scripts\test.ps1 -RealFiles    # only tests that use your real images in .\samplepics
+.\scripts\test.ps1 -RealFiles    # only tests that use your real images (.\samplepics and your Seestar folder)
 ```
 
 Direct commands: `cd backend; uv run --frozen pytest -q` · `uv run --frozen pytest -m "not gpu"` ·
 `cd frontend; npm run typecheck; npx playwright test`.
-GPU tests (marker `gpu`) are **skipped automatically** when CuPy/CUDA is unavailable; CPU-only runs never claim GPU
-support. Tests marked `realfiles` skip when `samplepics/` is absent. Synthetic images/FITS/TIFF in the tests are labelled
+Tests marked `aimodels` use the real downloaded AI models (default `%LOCALAPPDATA%\EasyAstroEnhance\ai-models`, or
+`EAE_AI_MODELS_DIR`) on a real Seestar stack and skip when either is missing; all other AI tests use tiny synthetic
+ONNX models. GPU tests (marker `gpu`) are **skipped automatically** when CuPy/CUDA is unavailable; CPU-only runs never claim GPU
+support. Tests marked `realfiles` skip when their files are absent: `samplepics/`, and your Seestar stacks under
+`EAE_SEESTAR_DIR` (default `D:\Seestar\MyWorks`; read-only — M31, M45 and M42 stacks are checked for orientation against
+the telescope's JPG, a neutral sky on target and no guardrail). Synthetic images/FITS/TIFF in the tests are labelled
 test fixtures and are never used as output content.
 
 Benchmarks / review helpers: `cd backend; uv run python tools/benchmark.py` (writes `docs/benchmarks.md`) and
-`uv run python tools/visual_review.py` (writes comparisons, 100% crops and reports to `docs/visual-review/`, git-ignored).
+`uv run python tools/visual_review.py [--dir "D:\Seestar\MyWorks\M 31"] [--presets natural,vivid]` (writes comparisons,
+100% crops and reports to `docs/visual-review/`, git-ignored).
 
 Development servers: `cd backend; $env:EASYASTRO_DEV_ORIGINS='http://localhost:5173'; uv run python -m app.serve` and
 `cd frontend; npm run dev` (Vite proxies `/api`).
@@ -103,44 +115,98 @@ frontend/ (React + TypeScript + Vite)         backend/app/
   atomic rename. Identical settings reuse the cached run (cache key: source SHA-256, engine + dependency versions,
   canonical recipe, per-file regions/background model, backend, precision); **Reprocess** always makes a new run.
 
-### Processing method disclosure (engine 1.0.0, recipe schema 2)
+### Processing method disclosure (engine 1.2.0, recipe schema 4 — one-button Enhance)
 
-Two display paths share one tail; no 8-bit conversion exists for TIFF/FITS (16-bit/float values are quantised only at
-the chosen export).
+Pick a **preset** (Natural, Vivid, Faint detail, Bright core (HDR), Star field, Seestar match), press **Enhance**.
+Six sliders (Background, Stretch, Contrast/Pop, Color, Detail, Noise reduction) and a *Protect bright cores* switch tune
+the result; everything else is measured from the image and recorded. The method follows the free tools Seestar owners
+use (Siril, GraXpert's classical background tools, VeraLux HyperMetric Stretch, AstroWizard), using only their
+classical algorithms — see [improve-enhance.md](improve-enhance.md). No 8-bit conversion exists for TIFF/FITS.
 
-* **Rendered (JPEG; display-referred TIFF/FITS):** optional supervised background correction → gentle luminance/chroma
-  residual shrinkage (robust MAD noise from valid, unprotected, non-star pixels; edge/star-aware gate) → rational
-  midtone curve + bounded manual offsets → star-protected stretch → optional local contrast → guarded luminance-ratio
-  reconstruction, hue-preserving gamut fitting, protected saturation → clipping check.
-* **Linear (stacked TIFF/FITS confirmed “Linear stack”):** one shared scale/offset (never per channel) →
-  background correction → denoise in the linear domain (**processed-linear array is saved here**, before any
-  display-only step) → luminance asinh display renderer with a recorded black/span/k → the same display tail.
-  Negative physical values are retained in the linear data; the baseline display uses a *frozen* mapping derived once from
-  the source so “Original” and “Enhanced” are never auto-stretched independently.
+* **Linear (stacked TIFF/FITS confirmed “Linear stack”)** — two pixel groups with analysis in between:
+  1. *Linear clean-up* (processed-linear array saved after this): optional supervised background → automatic
+     low-order **gradient** model (robust polynomial on sky boxes; skipped with a reason when the target fills the
+     frame or the gradient is negligible) → **background neutralization** (per-channel sky offset to one shared
+     pedestal — an offset per channel, never a per-channel scale) → bounded **white balance from field stars**
+     (median color of isolated, unsaturated stars; gains limited to ±25 %; skipped when unreliable; not photometric
+     calibration) → optional **Richardson–Lucy deconvolution** (Advanced, off by default; star-measured Gaussian PSF,
+     damped, SNR-gated, star cores excluded) → **à trous wavelet noise reduction** (luminance + chroma, per-scale
+     measured noise, structure/star/defect gated, coarse residual untouched).
+  2. *Display*: **hyperbolic luminance stretch** `Ls = (asinh(D·L+b) − asinh(b)) / (asinh(D+b) − asinh(b))` with
+     highlight convergence (bright cores fade to white instead of clipping), white point at the data maximum, D
+     auto-solved so the brightest extended signal lands at 0.88 (0.96 with core protection off), then an MTF that puts
+     the sky exactly on the Background level → gentler stretch inside confident star masks → HDR core compression
+     (only when a bright extended core is found) → SCNR green removal (only when green remains) → pop S-curve →
+     manual tone → multiscale **detail** (noise- and edge-gated) → protected saturation.
+* **Rendered (JPEG; display-referred TIFF/FITS):** background neutralization → wavelet noise reduction → rational
+  midtone gain + MTF toward the Background level (limited to 0.6–1.6× of the image's own sky) → star protection →
+  the same finishing tail.
+* The **Original** for linear data is a frozen *linked* autostretch (STF style, sky at 0.15) derived once per asset, so
+  the source's own color cast stays visible in the comparison.
+* **Seestar FITS orientation:** ZWO writes rows top-down without `ROWORDER`; those files are kept as stored so they
+  match the telescope's JPG (other FITS still follow the bottom-up convention).
 * **Tone controls** compose into one monotonic transform in fixed order: black point → brightness (2^EV, ±1 EV) →
-  shadows → highlights (smooth bounded bumps, ±0.12 peak). Neutral offsets add nothing; monotonicity is validated.
-* **Star protection** builds a soft mask from confidently identified compact sources (local background/noise, size,
-  shape, isolation and core-sharpness checks) and attenuates only the *positive* tone change where a star is brighter
-  than its star-free surroundings. It never removes, shrinks or replaces stars; unreliable detection is skipped and
-  disclosed.
-* **Local contrast** (off by default): guided-filter base/detail on luminance at a scale in full-resolution pixels,
-  noise-gated, bounded (±0.06), suppressed near stars/invalid/protected pixels. Not deconvolution.
-* **Background correction:** constant (≥3 confirmed regions) or first-order plane (≥6 widely distributed, non-collinear
-  confirmed regions; robust Huber fit with residual, conditioning, outlier and contamination checks). Confirmation is
-  stored per asset and is never copied by presets or “Apply to all”. Constant and plane terms are separated so nothing is
-  subtracted twice.
-* **Strength tables** (proposed tuning values, not universal): denoise 0.30/0.40/0.55, rational gain 1.25/1.45/1.75,
-  asinh k 20/45/90, saturation 1.08/1.12/1.20, star protection 0.50/0.75/0.90, local contrast 0.35/0.60/0.90,
-  background 0.5/0.75/1.0 (Gentle/Balanced/Strong). Natural = all Gentle; Brighter detail = all Balanced.
-* **Guardrail:** new black/white clipping (per-pixel transitions, invalid/protected excluded) above 0.1% reduces
-  strengths once and reruns; if still above, the conservative result is kept and flagged “review”.
-* **Deferred (not implemented):** calibration frames, stacking, debayering, cubes/multi-page TIFF, plate solving,
-  photometric calibration, higher-order gradients, deconvolution, star reduction/removal, narrowband palettes.
+  shadows → highlights. Neutral offsets add nothing; monotonicity is validated.
+* **Guardrail:** new black/white clipping (per-pixel transitions vs the original display; pixels already clipped in any
+  channel of the original are not new) above 0.1 % halves the finishing strengths once and reruns; if still above, the
+  result is flagged “review”.
+* **Not implemented by design:** generative processing, AI sharpening/deconvolution, star removal or reduction in the
+  output, catalog/plate-solve photometric calibration, cubes, narrowband palettes.
 
-This is **display enhancement, not scientific calibration**: background neutralization is not photometric colour
-calibration and a sharper look is not extra measured resolution. Every run’s `processing.json` records source SHA-256,
-engine/dependency versions, requested vs applied recipe, per-file resolved parameters, skipped steps with reasons,
+### AI tools (optional, engine 1.2.0, recipe schema 4)
+
+Under **AI tools** in the Enhancement panel, three switches are all off by default:
+
+| Tool | Model (licence) | Replaces | Works on |
+|---|---|---|---|
+| AI background extraction | GraXpert background 1.0.1, 218 MB (CC BY-NC-SA 4.0) | automatic polynomial gradient | linear stacks |
+| AI noise reduction | GraXpert denoise 3.0.2, 478 MB (CC BY-NC-SA 4.0); strength = Noise reduction slider | wavelet noise reduction | all images |
+| AI star separation | Cosmic Clarity Dark Star 2.1 / 2.1c, 15 MB each (MIT) | star-mask blending | linear stacks |
+
+* **Downloading models:** the first time you switch a tool on, click **Download** next to it, or manage all models in
+  Settings → AI models. The files come from fixed URLs and are verified by SHA-256 before use. If GraXpert is already
+  installed, its identical model files are copied instead of downloaded.
+* **Where they run:** on the GPU through DirectML (any DirectX 12 GPU), with the CPU as fallback. On an 8 MP Seestar
+  stack: background about 1.5 s, noise reduction about 17 s, star separation about 6–11 s.
+* **If a model is missing or fails:** the step is skipped with a reason and the classical step runs instead.
+* **Star separation:** the galaxy or nebula is stretched and finished on its own, then the stars are added back, kept
+  small. A bright galaxy core is protected from being mistaken for a star. The processed FITS still contains the stars.
+* **Stretch safeguard:** AI denoised data are treated as at most 2× cleaner when the stretch is chosen. Without this,
+  the solver over-stretched and amplified colour mottle.
+* **Disclosure:** every result's report lists each AI step with its model file, SHA-256, licence and GPU/CPU provider,
+  and FITS HISTORY names the models. GraXpert's models are licensed for non-commercial use only.
+* **Limits:** these networks predict pixel values. Background extraction can darken the faintest outer halo of a
+  frame-filling galaxy, and full-strength denoising can soften the faintest structure. Compare before and after.
+
+This is **display enhancement, not scientific calibration**: neutralization and star-based white balance are not
+photometric colour calibration and a sharper look is not extra measured resolution. Every run’s `processing.json`
+records source SHA-256, engine/dependency versions, requested vs applied recipe, every measured parameter (sky levels,
+pedestal, gradient model, white-balance gains, stretch D/b/p/floor/MTF, detectors), skipped steps with reasons,
 clipping transitions, noise estimate (with its limitations), backend/device/transfers/timings and export hashes.
+
+### Stacking (Stack frames…)
+
+Use **Stack frames…** (top bar, or the start screen) and paste a folder path, for example `D:\Seestar\MyWorks\M 42_sub`
+(File Explorer: right-click the folder → *Copy as path*). **Scan folder** shows what was found; **Start stacking** runs
+it in the background with a progress banner and Cancel. The folder is only read. The result is added as a new linear
+FITS image (`<target> - stacked N frames.fits`). It is **not** enhanced unless you tick *Enhance automatically when
+stacking finishes* (off by default), so you can look at it and adjust the settings first.
+
+* **Sub-frames** (raw Seestar `Light_*.fit`, CFA or mono): optional darks / flats / bias / dark-flats (separate folders
+  or tagged by `IMAGETYP` in the same folder) → fixed hot/cold pixel repair (found on the master dark, or on a median of
+  the lights) → frame measurement and grading (clouds, trailing, bloated stars, bright sky; each skipped frame has a
+  reason) → star alignment (triangle matching + RANSAC; handles alt-az field rotation) → bilinear debayer →
+  background matching → noise-weighted average with kappa-sigma rejection (removes satellite/plane trails).
+  Output: native size, or optional **2× drizzle** (Bayer drizzle; uncovered pixels are filled from the native stack and
+  the fraction is reported).
+* **Stacked images from several nights** (a folder of Seestar `Stacked_*.fit` of one target): aligned at any scale,
+  resampled onto the largest image, background-matched and averaged, weighted by integration time.
+* Debayering and resampling use the NVIDIA GPU when available. Measured on the target PC: 77 Seestar S30 subs
+  (1080 × 1920, 30 s) → 65 used (12 cloudy/blurred frames skipped with reasons), 0.40 px alignment RMS across 10° of
+  field rotation, 906 hot pixels repaired, ≈ 20 s (2× drizzle: ≈ 105 s, 2160 × 3840).
+* Every stacked value is a weighted mean of measured, resampled pixels — nothing is synthesized. The stack report (frames
+  used/rejected, calibration, alignment, weights, rejection, timings) is stored with the stack
+  (`GET /api/v1/stacks/{id}` → `full_report`); a summary is in the FITS `HISTORY`.
 
 ### Input handling
 
@@ -174,7 +240,10 @@ tests, and bump `PIPELINE_VERSION` if outputs change.
 | Port in use | `.\scripts\start.ps1 -Port 9000`. |
 | GPU shows “Processing: CPU” | Settings → **Check GPU setup**. “CuPy is not installed” → `.\scripts\setup-gpu.ps1`. “Failed to find CUDA headers” → the `[ctk]` extra is missing (re-run setup-gpu). Update the NVIDIA driver if the runtime is newer than the driver. CPU always works. |
 | “needs about X GB of memory” | The up-front estimate exceeded the RAM budget (default 60% of available). Close programs, or raise the memory fraction in Settings; a 100 MP linear RGB image needs tens of GB. |
-| “This file needs debayering or stacking first” | Single raw/CFA frames are not supported; export the telescope’s stacked RGB/mono image. |
+| AI tool shows “Model not downloaded” | Click **Download** next to it (internet needed once), or Settings → AI models. The classical step is used until then. |
+| “This file needs debayering or stacking first” | Single raw/CFA frames cannot be enhanced on their own; use **Stack frames…** on their folder, or add the telescope’s stacked RGB/mono image. |
+| Stacking: “Enter the full folder path” | Paste an absolute path such as `D:\Seestar\MyWorks\M 42_sub` (quotes are fine). |
+| Stacking: many frames skipped | Open the stack report; choose *Lenient* or *Off* under Advanced → *Skip poor frames* to keep more frames. |
 | Disk full | Free space; results are only published after validation, partial files are removed on restart. |
 
 ## 8. Status and known limitations

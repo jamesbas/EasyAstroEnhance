@@ -47,6 +47,10 @@ class Config:
         return self.data_dir / "tmp"
 
     @property
+    def ai_models_dir(self) -> Path:
+        return self.data_dir / "ai-models"
+
+    @property
     def allowed_hosts(self) -> set[str]:
         hosts = {f"127.0.0.1:{self.port}", f"localhost:{self.port}"}
         hosts.update(o.split("://", 1)[-1] for o in self.dev_origins)
@@ -76,5 +80,5 @@ def load_config(**overrides) -> Config:
 
 
 def ensure_dirs(cfg: Config) -> None:
-    for d in (cfg.data_dir, cfg.assets_dir, cfg.runs_dir, cfg.exports_dir, cfg.tmp_dir):
+    for d in (cfg.data_dir, cfg.assets_dir, cfg.runs_dir, cfg.exports_dir, cfg.tmp_dir, cfg.ai_models_dir):
         d.mkdir(parents=True, exist_ok=True)

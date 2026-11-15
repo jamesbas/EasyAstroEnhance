@@ -10,7 +10,7 @@ export function ResultNote({ asset, run }: ResultNoteProps) {
   if (!run) {
     return (
       <div className="result-note muted" data-testid="result-note-empty">
-        {asset.status === 'ready' ? 'Choose your enhancements, then press Enhance selected.' : 'Original view only until this image is ready.'}
+        {asset.status === 'ready' ? 'Pick a preset (or adjust the Look sliders), then press Enhance selected.' : 'Original view only until this image is ready.'}
       </div>
     );
   }

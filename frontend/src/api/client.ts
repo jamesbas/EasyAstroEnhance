@@ -2,7 +2,7 @@ import type {
   AppSettings, Asset, AssetList, BackgroundBody, BackgroundPreview, BackgroundSuggestion, BatchExportStarted,
   BatchIncludeKind, ComputeInfo, ComputePatchBody, ExportStatus, HistorySummary, Interpretation, Job, JobCreateBody,
   JobCreated, JobList, Preset, PresetList, Recipe, Rect, RunDetail, RunList, Session, StarMaskResult, UploadResult,
-  ApiErrorBody,
+  ApiErrorBody, Stack, StackCreateBody, StackFolders, StackList, StackPlan, AIOverview,
 } from './types';
 
 export const API = '/api/v1';
@@ -147,6 +147,18 @@ export const api = {
   listJobs: (active: boolean) => request<JobList>('GET', `/jobs${active ? '?active=true' : ''}`),
   cancelJob: (id: string) => request<Job>('POST', `/jobs/${id}/cancel`),
   retryJob: (id: string) => request<Job>('POST', `/jobs/${id}/retry`),
+  // optional AI tools (fixed, verified model files)
+  aiModels: () => request<AIOverview>('GET', '/ai/models'),
+  downloadAI: (key: string) => request<AIOverview>('POST', `/ai/models/${key}/download`),
+  cancelAI: (key: string) => request<AIOverview>('POST', `/ai/models/${key}/cancel`),
+  deleteAI: (key: string) => request<AIOverview>('DELETE', `/ai/models/${key}`),
+  // stacking (folders are read, never written)
+  scanStack: (body: StackFolders) => request<StackPlan>('POST', '/stacks/scan', body),
+  createStack: (body: StackCreateBody) => request<Stack>('POST', '/stacks', body),
+  listStacks: (active: boolean) => request<StackList>('GET', `/stacks${active ? '?active=true' : ''}`),
+  getStack: (id: string) => request<Stack>('GET', `/stacks/${id}`),
+  cancelStack: (id: string) => request<Stack>('POST', `/stacks/${id}/cancel`),
+  retryStack: (id: string) => request<Stack>('POST', `/stacks/${id}/retry`),
   // runs
   listRuns: (assetId: string) => request<RunList>('GET', `/runs?asset_id=${encodeURIComponent(assetId)}`),
   getRun: (id: string) => request<RunDetail>('GET', `/runs/${id}`),

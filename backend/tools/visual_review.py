@@ -1,8 +1,8 @@
-"""Visual-review helper: runs Natural and Brighter detail on every file in samplepics/ and writes, per file/preset,
-a full-frame comparison JPEG, matched 100% crops (bright region, dark sky, brightest star, bottom label area)
-and the processing report to docs/visual-review/ (git-ignored; never committed).
+"""Visual-review helper: runs every built-in preset on every file in samplepics/ (or --dir) and writes, per
+file/preset, a full-frame comparison JPEG, matched 100% crops (bright region, dark sky, brightest star, bottom
+label area) and the processing report to docs/visual-review/ (git-ignored; never committed).
 
-    uv run python tools/visual_review.py [--with-local-contrast]
+    uv run python tools/visual_review.py [--dir D:\\Seestar\\MyWorks\\M 31] [--presets natural,vivid]
 
 Aesthetic acceptance is the user's judgment; this only makes the review reproducible.
 """
@@ -59,27 +59,33 @@ def crop_sheet(base, enh, crops, size=160, zoom=2) -> Image.Image:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--with-local-contrast", action="store_true")
+    ap.add_argument("--dir", default=str(ROOT / "samplepics"), help="folder with images (read-only)")
+    ap.add_argument("--presets", default="", help="comma-separated preset ids (default: all built-ins)")
+    ap.add_argument("--device", default="cpu")
     args = ap.parse_args()
     out_root = ROOT / "docs" / "visual-review"
-    for path in sorted((ROOT / "samplepics").glob("*")):
-        if path.suffix.lower() not in (".jpg", ".jpeg", ".tif", ".tiff", ".fit", ".fits", ".fts"):
+    wanted = {p for p in args.presets.split(",") if p}
+    for path in sorted(Path(args.dir).glob("*")):
+        if path.suffix.lower() not in (".jpg", ".jpeg", ".tif", ".tiff", ".fit", ".fits", ".fts") or path.stem.endswith("_thn"):
             continue
         try:
             insp = inspect_file(path, 10**9)
         except ProcessingError as exc:
             print(f"skip {path.name}: {exc.message}")
             continue
-        interp = {"state": "linear"} if insp["format"] != "jpeg" else {}
+        interp: dict = {"state": "linear"} if insp["format"] != "jpeg" else {}
+        cands = [c for c in insp.get("candidates", []) if c.get("supported")]
+        if cands and cands[0]["kind"] in ("rgb_planes", "rgb_last"):
+            interp["layout"] = cands[0]["kind"]
         if evaluate_intake(insp, interp)["status"] != "ready":
             print(f"skip {path.name}: needs interpretation")
             continue
         img = read_image(path, sha256_file(path), 10**9, interp, insp)
         frame = prepare_linear_frame(img).to_dict() if img.domain == "linear" else None
         for pid, recipe in builtin_presets().items():
-            if args.with_local_contrast:
-                recipe = recipe.model_copy(update={"local_contrast": recipe.local_contrast.model_copy(update={"enabled": True})})
-            res = run_pipeline(img, recipe, AssetContext(frame=frame), ExecutionOptions(device="cpu"))
+            if wanted and pid not in wanted:
+                continue
+            res = run_pipeline(img, recipe, AssetContext(frame=frame), ExecutionOptions(device=args.device, gpu_available=args.device != "cpu"))
             d = out_root / path.stem[:40].replace(" ", "_") / pid
             d.mkdir(parents=True, exist_ok=True)
             left = "Original view" if img.domain == "display" else "Original shown with a display stretch"

@@ -6,9 +6,10 @@ interface UploadPanelProps {
   variant: 'empty' | 'compact';
   onFiles: (files: File[]) => void;
   uploading: boolean;
+  onStack?: () => void;
 }
 
-export function UploadPanel({ variant, onFiles, uploading }: UploadPanelProps) {
+export function UploadPanel({ variant, onFiles, uploading, onStack }: UploadPanelProps) {
   const input = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
 
@@ -62,6 +63,12 @@ export function UploadPanel({ variant, onFiles, uploading }: UploadPanelProps) {
         </p>
         <p className="helper">JPEG, TIFF, FITS • Multiple files supported • Processed on this computer</p>
       </div>
+      {onStack && (
+        <p className="helper stack-hint">
+          Have a folder of raw sub-frames (for example a Seestar <code>…_sub</code> folder)?{' '}
+          <button type="button" className="btn" onClick={onStack} data-testid="stack-button-empty">Stack frames…</button>
+        </p>
+      )}
     </section>
   );
 }

@@ -151,6 +151,27 @@ def layout_question(candidate: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def is_seestar(header) -> bool:
+    text = " ".join(str(header.get(k, "") or "") for k in ("CREATOR", "INSTRUME", "TELESCOP"))
+    return "seestar" in text.lower()
+
+
+def row_order(header) -> tuple[bool, str]:
+    """Return (flip_rows_for_display, orientation note).
+
+    FITS assumes row 0 is the bottom of the image. ZWO Seestar stacks are written top-down without a ROWORDER
+    keyword (verified against the telescope's own JPG), so they are kept as stored.
+    """
+    roworder = str(header.get("ROWORDER", "") or "").strip().upper()
+    if roworder == "TOP-DOWN":
+        return False, "ROWORDER=TOP-DOWN: rows kept as stored"
+    if roworder == "BOTTOM-UP":
+        return True, "ROWORDER=BOTTOM-UP: rows flipped vertically once for display; flipped back on FITS export"
+    if is_seestar(header):
+        return False, "ZWO Seestar file without ROWORDER: rows are stored top-down and kept as stored (matches the telescope's JPG)"
+    return True, "FITS rows flipped vertically once for display (row 0 is the bottom of the image); flipped back on FITS export"
+
+
 def sensitive_keywords_in(header) -> list[str]:
     return [k for k in header.keys() if k.upper() in SENSITIVE_KEYS]
 
@@ -221,15 +242,10 @@ def read_fits(
     valid = finite.all(axis=2) if data.ndim == 3 else finite
     raw = np.where(finite, data, 0)
 
-    flip = str(header.get("ROWORDER", "BOTTOM-UP")).strip().upper() != "TOP-DOWN"
+    flip, orient = row_order(header)
     if flip:
         raw = np.ascontiguousarray(raw[::-1])
         valid = np.ascontiguousarray(valid[::-1])
-    orient = (
-        "FITS rows flipped vertically once for display (row 0 is the bottom of the image); flipped back on FITS export"
-        if flip
-        else "ROWORDER=TOP-DOWN: rows kept as stored"
-    )
     units = str(header.get("BUNIT", "") or "unspecified (assumed ADU)")
     notes = [cand["message"]] if cand.get("message") else []
     if not valid.all():

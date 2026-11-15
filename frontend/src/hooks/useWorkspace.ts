@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, readableError } from '../api/client';
-import type { Asset, Job } from '../api/types';
+import type { Asset, Job, Stack } from '../api/types';
 
 const ACTIVE_ITEM = new Set(['queued', 'running']);
 
@@ -11,6 +11,7 @@ export function assetIsActive(a: Asset): boolean {
 export interface Workspace {
   assets: Asset[];
   activeJobs: Job[];
+  activeStacks: Stack[];
   loaded: boolean;
   offline: string | null;
   refresh: () => Promise<void>;
@@ -18,10 +19,11 @@ export interface Workspace {
   remove: (id: string) => void;
 }
 
-// Polls /assets and active jobs ~1 s while anything is inspecting/queued/running (5 s in hidden tabs); idle = no polling.
+// Polls /assets, active jobs and active stacks ~1 s while anything is inspecting/queued/running (5 s in hidden tabs); idle = no polling.
 export function useWorkspace(): Workspace {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [activeJobs, setActiveJobs] = useState<Job[]>([]);
+  const [activeStacks, setActiveStacks] = useState<Stack[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [offline, setOffline] = useState<string | null>(null);
   const inFlight = useRef(false);
@@ -32,10 +34,11 @@ export function useWorkspace(): Workspace {
     inFlight.current = true;
     const gen = generation.current;
     try {
-      const [a, j] = await Promise.all([api.listAssets(), api.listJobs(true)]);
+      const [a, j, s] = await Promise.all([api.listAssets(), api.listJobs(true), api.listStacks(true)]);
       if (gen === generation.current) {
         setAssets(a.assets);
         setActiveJobs(j.jobs);
+        setActiveStacks(s.stacks);
         setOffline(null);
         setLoaded(true);
       }
@@ -66,7 +69,7 @@ export function useWorkspace(): Workspace {
     void refresh();
   }, [refresh]);
 
-  const busy = assets.some(assetIsActive) || activeJobs.length > 0 || offline !== null;
+  const busy = assets.some(assetIsActive) || activeJobs.length > 0 || activeStacks.length > 0 || offline !== null;
 
   useEffect(() => {
     if (!busy) return undefined;
@@ -91,5 +94,5 @@ export function useWorkspace(): Workspace {
     };
   }, [busy, refresh]);
 
-  return { assets, activeJobs, loaded, offline, refresh, upsert, remove };
+  return { assets, activeJobs, activeStacks, loaded, offline, refresh, upsert, remove };
 }

@@ -9,7 +9,7 @@ from typing import Any
 
 from .recipe import PIPELINE_VERSION, RECIPE_SCHEMA_VERSION
 
-_PACKAGES = ("numpy", "scipy", "astropy", "tifffile", "imagecodecs", "pillow", "pydantic", "fastapi", "cupy-cuda13x")
+_PACKAGES = ("numpy", "scipy", "astropy", "tifffile", "imagecodecs", "pillow", "pydantic", "fastapi", "cupy-cuda13x", "onnxruntime-directml", "onnxruntime")
 
 
 @lru_cache(maxsize=1)

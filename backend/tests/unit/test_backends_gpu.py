@@ -13,13 +13,14 @@ import textwrap
 import numpy as np
 import pytest
 
-from app.processing import local_contrast as lcm
+from app.processing import finishing as fin
 from app.processing.backends import BackendUnavailable, NumpyBackend, RecoverableBackendError, get_backend, probe_cuda
-from app.processing.denoise import DenoiseParams, denoise
+from app.processing.denoise import DenoiseParams, WaveletNoise, denoise
 from app.processing.imagedata import Cancelled
 from app.processing.masks import masked_gaussian
 from app.processing.pipeline import AssetContext, ExecutionOptions, choose_backend, run_pipeline
-from app.processing.recipe import Recipe, Switch, ToneRecipe, builtin_presets
+from app.processing.recipe import builtin_presets
+from app.processing.stretch import apply_stretch, solve_stretch
 from conftest import linear_field, make_image, synthetic_field
 
 
@@ -77,7 +78,7 @@ def factory_with(plan, unavailable=False):
 
 
 def rgb_recipe():
-    return Recipe(**{**builtin_presets()["brighter-detail"].model_dump(), "local_contrast": {"enabled": True, "strength": "gentle"}})
+    return builtin_presets()["vivid"]
 
 
 def run(img, recipe=None, ctx=None, **opts):
@@ -210,16 +211,19 @@ def test_gpu_gaussian_and_masked_gaussian_match_cpu(cuda):
 
 
 @pytest.mark.gpu
-def test_gpu_denoise_and_local_contrast_match_cpu(cuda):
+def test_gpu_denoise_detail_and_stretch_match_cpu(cuda):
     cpu, gpu = NumpyBackend(), get_backend("gpu")
     arr, _ = synthetic_field(h=140, w=180, seed=1)
     w = np.ones(arr.shape[:2], np.float32)
     star = np.zeros(arr.shape[:2], np.float32)
-    p = DenoiseParams(0.4, 0.01, 0.01)
+    p = DenoiseParams(0.6, 4, 5, WaveletNoise((0.01, 0.004, 0.002, 0.001), (0.01, 0.004, 0.002, 0.001, 0.0005)))
     tol(gpu.asnumpy(denoise(gpu, gpu.asarray(arr), gpu.asarray(w), gpu.asarray(star), p)), denoise(cpu, arr, w, star, p), "denoise")
     L = arr.mean(-1)
-    lp = lcm.LocalContrastParams(0.6, 24.0, 0.002)
-    tol(gpu.asnumpy(lcm.local_contrast_boost(gpu, gpu.asarray(L), gpu.asarray(w), gpu.asarray(star), lp)), lcm.local_contrast_boost(cpu, L, w, star, lp), "local contrast")
+    dp = fin.DetailParams(0.6, 4, (0.002, 0.001, 0.0008, 0.0005))
+    tol(gpu.asnumpy(fin.detail_boost(gpu, gpu.asarray(L), gpu.asarray(w), gpu.asarray(star), dp)), fin.detail_boost(cpu, L, w, star, dp), "detail")
+    lin = linear_field(h=120, w=150, seed=3) / 20000.0
+    sp = solve_stretch(0.05, 0.001, 0.4, 1.0, 0.12, protect_cores=True, amount=0.0)
+    tol(gpu.asnumpy(apply_stretch(gpu.xp, gpu.asarray(lin), sp)), apply_stretch(np, lin, sp), "stretch")
 
 
 @pytest.mark.gpu
@@ -235,14 +239,17 @@ def test_gpu_pipeline_parity_with_cpu_reference(cuda, kind):
     cpu = run(img, r, device="cpu")
     gpu = run(img, r, device="gpu", gpu_available=True)
     assert gpu.report["execution"]["actual_backend"] == "gpu" and not gpu.report["execution"]["fallbacks"]
-    np.testing.assert_allclose(gpu.display, cpu.display, atol=2e-5, rtol=1e-4)  # float arrays
+    # The linear stretch has a steep slope at the sky level, amplifying float32 rounding differences between the
+    # CuPy and NumPy transcendental functions ~100x; 8-bit equality is checked separately below.
+    atol = 2e-4 if kind == "linear_rgb" else 2e-5
+    np.testing.assert_allclose(gpu.display, cpu.display, atol=atol, rtol=1e-4)  # float arrays
     assert np.abs(np.rint(gpu.display * 255) - np.rint(cpu.display * 255)).max() <= 1  # display differences inspected separately
     cc, gc = cpu.report["clipping"]["final"], gpu.report["clipping"]["final"]
     for k in ("input_zero", "input_max"):
         assert cc[k] == gc[k]
     assert abs(cc["new_black"] - gc["new_black"]) <= max(3, 0.0005 * cc["eligible_channel_values"])  # equivalent clipping decisions
     assert cpu.report["clipping"]["guard_action"] == gpu.report["clipping"]["guard_action"]
-    sp = lambda r: [o for o in r.report["operations"] if o["name"] == "star_protection"][0]["parameters"]  # noqa: E731
+    sp = lambda r: [o for o in r.report["operations"] if o["name"] == "star_stretch"][0]["parameters"]  # noqa: E731
     if sp(cpu):
         assert sp(cpu)["accepted_stars"] == sp(gpu)["accepted_stars"]  # identical star-mask topology (mask is global/CPU)
     if kind == "linear_rgb":

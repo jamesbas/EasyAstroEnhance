@@ -111,10 +111,13 @@ test.describe('upload, enhance, compare, download', () => {
     await page.goto('/');
     await uploadAndWaitReady(page);
     await expect(page.getByTestId('preset-select')).toHaveValue('natural');
-    await page.getByTestId('preset-select').selectOption('brighter-detail');
-    await expect(page.getByTestId('strength-denoise').getByRole('button', { name: 'Balanced' })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByTestId('look-controls')).toBeVisible();
+    await page.getByTestId('preset-select').selectOption('vivid');
+    await expect(page.getByTestId('value-color')).toHaveText('0.60');
+    await expect(page.getByTestId('value-background-level')).toHaveText('0.10');
+    await expect(page.getByTestId('preset-description')).toContainText('pop');
 
-    await page.getByTestId('switch-local-contrast').check();
+    await page.getByTestId('slider-detail').fill('0.8');
     await expect(page.getByTestId('preset-select')).toHaveValue('custom');
     await page.getByTestId('save-preset').click();
     await page.getByTestId('preset-name').fill('My contrast');
