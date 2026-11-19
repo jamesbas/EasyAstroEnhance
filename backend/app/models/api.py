@@ -21,6 +21,7 @@ class InterpretationIn(BaseModel):
     hdu: int | None = None
     layout: str | None = None
     state: Literal["linear", "rendered", "unsure"] | None = None
+    dualband_confirmed: bool | None = None
 
 
 class RegionsIn(BaseModel):

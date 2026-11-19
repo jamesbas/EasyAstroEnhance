@@ -232,7 +232,8 @@ def test_star_mask_overlay_and_history_clear(client, tmp_path):
 
 def test_compute_endpoints_report_truthful_status(client):
     c0 = client.get("/api/v1/compute").json()
-    assert c0["preference"] == "auto" and c0["probe"] is None and "not checked" in c0["note"]
+    assert c0["preference"] == "auto" and c0["probe"] is None
+    assert ("CPU-only" if client.cfg.cpu_only else "not checked") in c0["note"]
     probed = client.post("/api/v1/compute/probe").json()
     assert probed["probe"]["status"] in ("ready", "unavailable", "failed")
     if not probed["gpu_usable"]:

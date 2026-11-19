@@ -12,6 +12,7 @@ export default defineConfig({
     baseURL: process.env.EAE_BASE_URL ?? 'http://127.0.0.1:8765',
     channel: 'msedge',
     headless: true,
+    launchOptions: { args: process.env.EASYASTRO_CPU_ONLY === '1' ? ['--disable-gpu'] : [] },
     viewport: { width: 1440, height: 900 },
     trace: 'retain-on-failure',
     acceptDownloads: true,

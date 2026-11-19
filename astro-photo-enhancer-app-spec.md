@@ -50,7 +50,7 @@ These are release requirements, not optional marketing promises:
 3. Preserve field of view, dimensions, star coordinates, orientation and existing structures. Apply EXIF orientation once and document it. Do not crop, rotate, resize or remove stars automatically.
 4. Preserve originals byte-for-byte. Processing changes pixels; avoid claiming that every output pixel is an original measured value or that filtering guarantees preservation of all faint signal.
 5. Keep edits reproducible with source SHA-256, pipeline version, algorithm settings, resolved per-file parameters and dependency versions.
-6. Distinguish display enhancement from scientific calibration. Background neutralization and star-based white balance are not photometric color calibration; a sharper appearance is not additional measured resolution.
+6. Distinguish display enhancement from scientific calibration. Background neutralization and star-based white balance are not photometric color calibration; a sharper appearance is not additional measured resolution. Optional offline catalog color uses user-provided numerical RGB reference-star ratios on solved broadband FITS. This is relative color calibration, not reference-image processing or absolute flux calibration.
 7. Preserve burned-in telescope labels using explicit protected regions. Never reconstruct sky behind lettering.
 8. Star removal and star-size reduction stay disabled. *(Amended 1.5: AI star separation splits stars from the background only so each is processed appropriately; the stars are always added back and no output is starless.)* *(Amended 1.3:)* Deconvolution is available only as an opt-in Advanced option on linear stacks (star-measured PSF, damped, SNR-gated, star cores excluded); the multiscale Detail stage is noise- and edge-gated and bounded. Both are disclosed per run.
 9. Report applied, reduced and skipped operations per image. Never silently claim success for an unsupported operation.
@@ -172,9 +172,20 @@ These constants apply to the rendered baseline only. They are not valid physical
   soften the faintest structure at full strength; star separation leaves very large saturated stars partly in the
   starless image (they are added back unchanged).
 
+### Engine 1.3.0 — optional color workflow
+
+- Keep the one-button defaults and immutable source workflow. Migrate recipe schemas 3/4 to schema 5 with the new settings neutral.
+- Object Color is a bounded display-only saturation adjustment by hue, guarded by sky signal, star, protection and highlight masks. Use an opt-in thumbnail/mask preview. Disclose skipped protection and clipping guardrail outcomes.
+- Catalog color uses celestial WCS from the chosen FITS HDU, never an upload or a network lookup. Validate and hash the local catalog, fit gains from unambiguous unsaturated reference-star matches, and report fallback. Disable broadband color correction for the app's intentional filter mixes.
+- Focused stretch is an opt-in, sky-anchored asinh curve on linear data; record the resolved pivot, curve strength and protections.
+- Channel mixes create a separate linear FITS with explicit input roles, gain, WCS alignment and source hashes. Preserve the reference grid and invalid overlap; do not generate missing signal. Unsolved inputs must be explicitly prealigned. No star replacement or starless output is introduced.
+- Engine 1.3.1 / recipe schema 6: a separate single-click Hubble-style action for recognized or explicitly confirmed H-alpha/OIII linear color FITS. Default Enhance and existing presets remain unchanged. The optional strength blends gold/teal according to sky-subtracted red and green/blue signal, with star, sky and highlight protection and no inferred sulfur channel. The processed-linear export is unchanged; the display recipe, mask inputs and any skipped operation are recorded. Known broadband data cannot be confirmed as dual-band.
+
 ### Deferred
 
-~~Calibration frame processing; registration and stacking; automatic debayering;~~ *(amended 1.4: now in version 1.2 stacking)* arbitrary cubes and multi-page stacks; plate solving; catalog-based photometric calibration; star reduction/removal; narrowband palette synthesis; ~~learned (AI) processing of any kind~~ *(amended 1.5: only the three opt-in AI tools; any other learned processing stays deferred)*; native installer; cloud hosting; accounts; remote mobile access; commercial billing. *(Amended 1.3: low-order (degree ≤ 3) automatic gradient models and opt-in deconvolution are no longer deferred.)*
+Arbitrary cubes and multi-page stacks; plate solving; absolute flux calibration; star reduction/removal in exports;
+additional learned processing beyond the three opt-in tools; native installer; cloud hosting; accounts; remote
+mobile access; commercial billing.
 
 Deliver an initial JPEG vertical slice first, but do not call the full version 1 complete until real TIFF and stacked FITS fixtures pass validation. Staged development is not permission to omit the requested formats.
 

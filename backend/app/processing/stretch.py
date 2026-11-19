@@ -149,6 +149,8 @@ class StretchParams:
     sky_level: float = 0.0
     sky_sigma: float = 0.0
     sky_display_sigma: float = 0.0
+    pivot: float | None = None
+    floor_sigmas: float = FLOOR_SIGMAS
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -157,12 +159,22 @@ class StretchParams:
             "u = x / white; L = mean(u); Ls = (asinh(D*L+b)-asinh(b))/(asinh(D+b)-asinh(b)); "
             "rgb = Ls*(u/L*(1-Ls^p)+Ls^p); y = MTF(m, (rgb-floor)/(1-floor))"
         )
+        if self.pivot is not None:
+            d["formula"] = "Endpoint-normalized asinh(D * (L - pivot)), followed by sky-anchored MTF and highlight convergence."
         return d
 
     def gentler(self, factor: float = STAR_D_FACTOR) -> "StretchParams":
         """The same stretch with a smaller D, re-balanced so the sky lands at the same display level."""
         return solve_fixed(self.sky_level, self.sky_sigma, self.hi_level, self.white, self.target, max(1.0, self.D * factor), self.b, self.p,
-                           self.hi_target, None, "star-gentle")
+                           self.hi_target, None, "star-gentle", self.pivot, self.floor_sigmas)
+
+
+def _curve(xp, L, D: float, b: float, pivot: float | None):
+    if pivot is None:
+        return hyperbolic(xp, L, D, b)
+    lo = float(np.arcsinh(-D * pivot))
+    hi = float(np.arcsinh(D * (1 - pivot)))
+    return (xp.arcsinh(D * (L - pivot)) - lo) / (hi - lo)
 
 
 def apply_stretch(xp, x, sp: StretchParams):
@@ -173,7 +185,7 @@ def apply_stretch(xp, x, sp: StretchParams):
     channels (the faint-signal color is unreliable there anyway)."""
     u = xp.maximum(x * (1.0 / sp.white), 0.0)
     L = stretch_luminance(xp, u)
-    Ls = xp.clip(hyperbolic(xp, L, sp.D, sp.b), 0.0, 1.0)
+    Ls = xp.clip(_curve(xp, L, sp.D, sp.b, sp.pivot), 0.0, 1.0)
     if u.ndim == 3:
         r = u / xp.maximum(L, 1e-12)[..., None]
         sky_u, sig_u = sp.sky_level / sp.white, max(sp.sky_sigma / sp.white, 1e-12)
@@ -189,22 +201,33 @@ def apply_stretch(xp, x, sp: StretchParams):
     return mtf(xp, sp.m, v)
 
 
-def _chain_parts(sky: float, sigma: float, hi: float, white: float, target: float, D: float, b: float):
-    Hs = float(hyperbolic(np, np.float64(sky / white), D, b))
-    sp = float(hyperbolic(np, np.float64((sky + sigma) / white), D, b))
-    sm = float(hyperbolic(np, np.float64(max(sky - sigma, 0.0) / white), D, b))
+def _chain_parts(sky: float, sigma: float, hi: float, white: float, target: float, D: float, b: float,
+                 pivot: float | None = None, floor_sigmas: float = FLOOR_SIGMAS):
+    Hs = float(_curve(np, np.float64(sky / white), D, b, pivot))
+    sp = float(_curve(np, np.float64((sky + sigma) / white), D, b, pivot))
+    sm = float(_curve(np, np.float64(max(sky - sigma, 0.0) / white), D, b, pivot))
     s_pre = max((sp - sm) / 2.0, 1e-12)
-    floor = max(0.0, Hs - FLOOR_SIGMAS * s_pre)
+    floor = max(0.0, Hs - floor_sigmas * s_pre)
     m = mtf_balance(target, (Hs - floor) / (1.0 - floor))
-    Hh = float(hyperbolic(np, np.float64(min(hi / white, 1.0)), D, b))
+    Hh = float(_curve(np, np.float64(min(hi / white, 1.0)), D, b, pivot))
     out_hi = float(mtf(np, m, np.clip((Hh - floor) / (1.0 - floor), 0.0, 1.0)))
     s_disp = float(mtf(np, m, np.clip((sp - floor) / (1.0 - floor), 0, 1)) - mtf(np, m, np.clip((sm - floor) / (1.0 - floor), 0, 1))) / 2.0
     return floor, m, out_hi, s_disp
 
 
-def solve_fixed(sky, sigma, hi, white, target, D, b, p, hi_target, D_auto, source) -> StretchParams:
-    floor, m, out_hi, s_disp = _chain_parts(sky, sigma, hi, white, target, D, b)
-    return StretchParams(white, float(D), b, p, floor, m, target, D_auto, source, hi, hi_target, out_hi, sky, sigma, s_disp)
+def solve_fixed(sky, sigma, hi, white, target, D, b, p, hi_target, D_auto, source,
+                pivot: float | None = None, floor_sigmas: float = FLOOR_SIGMAS) -> StretchParams:
+    floor, m, out_hi, s_disp = _chain_parts(sky, sigma, hi, white, target, D, b, pivot, floor_sigmas)
+    return StretchParams(white, float(D), b, p, floor, m, target, D_auto, source, hi, hi_target, out_hi, sky, sigma, s_disp, pivot, floor_sigmas)
+
+
+def solve_focus(sky: float, sigma: float, hi: float, white: float, target: float, strength: float, focus: float,
+                protect_shadows: bool, protect_highlights: bool) -> StretchParams:
+    hi = max(hi, sky + 3 * sigma)
+    pivot = float(np.clip((sky + focus * (hi - sky)) / white, 0, 1))
+    return solve_fixed(sky, sigma, hi, white, target, 10.0 ** (3.0 * strength), 0.0,
+                       2.0 if protect_highlights else 6.0, HI_TARGET_PROTECT if protect_highlights else HI_TARGET_OPEN,
+                       None, "manual-focus", pivot, 8.0 if protect_shadows else FLOOR_SIGMAS)
 
 
 def solve_stretch(

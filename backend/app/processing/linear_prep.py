@@ -252,24 +252,15 @@ class WhiteBalance:
         }
 
 
-def star_white_balance(
-    u_corr: np.ndarray, star_hard: np.ndarray | None, saturated: np.ndarray, sigma_l: float, limit: float = WB_DEFAULT_LIMIT,
-) -> WhiteBalance:
-    """``u_corr``: H x W x 3 linear data with the sky removed (background ~ 0 in every channel)."""
-    wb = WhiteBalance(False, limit=limit)
-    if u_corr.ndim != 3:
-        wb.reason = "Monochrome image."
-        return wb
-    if star_hard is None or not star_hard.any():
-        wb.reason = "Star detection was not reliable, so there is no star color reference."
-        return wb
+def measure_star_fluxes(u_corr: np.ndarray, star_hard: np.ndarray, saturated: np.ndarray, sigma_l: float,
+                         valid: np.ndarray | None = None):
+    """Positions and aperture fluxes of isolated, unsaturated stars after sky subtraction."""
     labels, n = ndimage.label(star_hard)
     objs = ndimage.find_objects(labels)
     h, w = star_hard.shape
     L = u_corr.mean(axis=2)
     peaks = ndimage.maximum(L, labels, index=np.arange(1, n + 1)) if n else np.array([])
     order = np.argsort(-np.asarray(peaks))[:WB_MAX_STARS] if n else []
-    ratios = []
     for idx in order:
         sl = objs[idx]
         if sl is None:
@@ -284,6 +275,11 @@ def star_white_balance(
         inner = ndimage.binary_dilation(comp, iterations=4)
         outer = ndimage.binary_dilation(comp, iterations=7)
         ann = outer & ~inner & (labels[y0:y1, x0:x1] == 0)
+        if valid is not None:
+            local = valid[y0:y1, x0:x1]
+            if not local[ap].all():
+                continue
+            ann &= local
         if ann.sum() < 12:
             continue
         sub = u_corr[y0:y1, x0:x1]
@@ -294,7 +290,22 @@ def star_white_balance(
         flux = sub[ap].sum(axis=0) - bg * npx
         if (flux <= 0).any() or float(flux.mean()) < 10.0 * sigma_l * np.sqrt(npx):
             continue
-        ratios.append((flux[0] / flux[1], flux[2] / flux[1]))
+        yy, xx = np.nonzero(comp)
+        yield (x0 + xx.mean(), y0 + yy.mean()), flux
+
+
+def star_white_balance(
+    u_corr: np.ndarray, star_hard: np.ndarray | None, saturated: np.ndarray, sigma_l: float, limit: float = WB_DEFAULT_LIMIT,
+) -> WhiteBalance:
+    """``u_corr``: H x W x 3 linear data with the sky removed (background ~ 0 in every channel)."""
+    wb = WhiteBalance(False, limit=limit)
+    if u_corr.ndim != 3:
+        wb.reason = "Monochrome image."
+        return wb
+    if star_hard is None or not star_hard.any():
+        wb.reason = "Star detection was not reliable, so there is no star color reference."
+        return wb
+    ratios = [(f[0] / f[1], f[2] / f[1]) for _, f in measure_star_fluxes(u_corr, star_hard, saturated, sigma_l)]
     wb.stars_used = len(ratios)
     if len(ratios) < WB_MIN_STARS:
         wb.reason = f"Only {len(ratios)} isolated, unsaturated stars were found (need {WB_MIN_STARS}); white balance skipped."

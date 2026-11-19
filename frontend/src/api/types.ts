@@ -62,6 +62,29 @@ export interface AIRecipe {
 }
 export type AITool = keyof AIRecipe;
 
+export interface ObjectColorRecipe {
+  reds: number;
+  greens: number;
+  blues: number;
+}
+
+export interface FocusStretchRecipe {
+  enabled: boolean;
+  strength: number;
+  focus: number;
+  protect_shadows: boolean;
+  protect_highlights: boolean;
+}
+
+export type MixMode = 'RGB' | 'LRGB' | 'HOO' | 'SHO' | 'DUAL-SHO' | 'HA-RGB';
+export interface ColorMixBody {
+  mode: MixMode;
+  asset_ids: string[];
+  gains: number[];
+  strength: number;
+  prealigned: boolean;
+}
+
 export interface Recipe {
   schema_version: number;
   preset: string;
@@ -72,6 +95,10 @@ export interface Recipe {
   protect_regions: boolean;
   advanced: AdvancedRecipe;
   ai: AIRecipe;
+  object_color: ObjectColorRecipe;
+  focus_stretch: FocusStretchRecipe;
+  catalog_sha256: string | null;
+  hubble_strength: number;
 }
 
 export interface Rect {
@@ -149,6 +176,7 @@ export interface Interpretation {
   hdu?: number;
   layout?: string;
   state?: InputState;
+  dualband_confirmed?: boolean;
 }
 
 export interface ResolvedIntake {
@@ -190,6 +218,7 @@ export interface Asset {
   bit_depth: number | null;
   questions: Question[];
   interpretation: Interpretation;
+  hubble_input: 'dualband' | 'unknown' | 'broadband' | 'unsupported';
   resolved: ResolvedIntake | null;
   can_process: boolean;
   intake_message: string | null;

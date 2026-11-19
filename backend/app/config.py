@@ -25,6 +25,7 @@ class Config:
     gpu_memory_fraction: float = 0.7
     gpu_threshold_pixels: int = 2_000_000
     min_free_bytes: int = 256 * 1024 * 1024
+    cpu_only: bool = False
 
     @property
     def db_path(self) -> Path:
@@ -51,6 +52,10 @@ class Config:
         return self.data_dir / "ai-models"
 
     @property
+    def color_catalog_dir(self) -> Path:
+        return self.data_dir / "color-catalogs"
+
+    @property
     def allowed_hosts(self) -> set[str]:
         hosts = {f"127.0.0.1:{self.port}", f"localhost:{self.port}"}
         hosts.update(o.split("://", 1)[-1] for o in self.dev_origins)
@@ -75,10 +80,11 @@ def load_config(**overrides) -> Config:
         frontend_dist=dist if dist.exists() else None,
         dev_origins=dev,
         gpu_threshold_pixels=int(env.get("EASYASTRO_GPU_THRESHOLD_PIXELS", 2_000_000)),
+        cpu_only=env.get("EASYASTRO_CPU_ONLY") == "1",
     )
     return replace(cfg, **overrides) if overrides else cfg
 
 
 def ensure_dirs(cfg: Config) -> None:
-    for d in (cfg.data_dir, cfg.assets_dir, cfg.runs_dir, cfg.exports_dir, cfg.tmp_dir, cfg.ai_models_dir):
+    for d in (cfg.data_dir, cfg.assets_dir, cfg.runs_dir, cfg.exports_dir, cfg.tmp_dir, cfg.ai_models_dir, cfg.color_catalog_dir):
         d.mkdir(parents=True, exist_ok=True)

@@ -3,24 +3,36 @@ from __future__ import annotations
 import asyncio
 import errno
 import hashlib
+import io
 import re
 import shutil
 import stat
 from pathlib import Path
-from typing import Any
+from tempfile import NamedTemporaryFile
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Request, UploadFile
+from fastapi import APIRouter, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, Response
+import numpy as np
+from PIL import Image
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..db import new_id, now
 from ..models.api import BackgroundIn, InterpretationIn, RegionsIn
 from ..processing.imagedata import ProcessingError
+from ..processing.catalog_color import MAX_BYTES, parse_catalog
+from ..processing.color import luminance
+from ..processing.color_mix import MIX_ROLES
+from ..processing.linear_prep import clipped_stats, sky_stats
 from ..processing.masks import validate_regions
+from ..processing.object_color import hubble_style, selective_color
 from ..processing.readers import detect_format, evaluate_intake, inspect_file
+from ..processing.recipe import ObjectColorRecipe
+from ..processing.star_protection import detect_stars
 from ..services import previews
 from .common import (
-    ApiError, cfg_of, coord_of, db_of, get_asset, run_worker_task, serialize_asset,
+    ApiError, asset_hubble_input, cfg_of, coord_of, db_of, get_asset, run_worker_task, serialize_asset,
 )
 
 router = APIRouter(prefix="/assets", tags=["assets"])
@@ -113,6 +125,124 @@ async def list_assets(request: Request) -> dict[str, Any]:
     return {"assets": [serialize_asset(db, coord, cfg, a) for a in rows]}
 
 
+@router.post("/color-catalog")
+async def import_color_catalog(request: Request, file: UploadFile) -> dict[str, Any]:
+    cfg = cfg_of(request)
+    try:
+        contents = await file.read(MAX_BYTES + 1)
+        values = await run_in_threadpool(parse_catalog, contents)
+    except ProcessingError as exc:
+        raise ApiError(422, exc.code, exc.message) from exc
+    finally:
+        await file.close()
+    digest = hashlib.sha256(contents).hexdigest()
+    folder = cfg.color_catalog_dir
+    if shutil.disk_usage(folder).free < cfg.min_free_bytes + len(contents):
+        raise ApiError(507, "DISK_FULL", "There is not enough space to store the reference catalog.")
+    with NamedTemporaryFile(dir=folder, suffix=".part", delete=False) as f:
+        tmp = Path(f.name)
+    try:
+        tmp.write_bytes(contents)
+        tmp.replace(folder / f"{digest}.csv")
+    finally:
+        tmp.unlink(missing_ok=True)
+    return {"sha256": digest, "name": clean_name(file.filename), "stars": len(values)}
+
+
+class ColorMixIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["RGB", "LRGB", "HOO", "SHO", "DUAL-SHO", "HA-RGB"]
+    asset_ids: list[str] = Field(min_length=2, max_length=4)
+    gains: list[Annotated[float, Field(ge=0.01, le=100)]] = Field(min_length=2, max_length=4)
+    strength: float = Field(0.5, ge=0, le=1)
+    prealigned: bool = False
+
+
+@router.post("/color-mix", status_code=201)
+async def create_color_mix(request: Request, body: ColorMixIn) -> dict[str, Any]:
+    cfg, db, coord = cfg_of(request), db_of(request), coord_of(request)
+    n = len(MIX_ROLES[body.mode])
+    if len(set(body.asset_ids)) != n or len(body.asset_ids) != n or len(body.gains) != n:
+        raise ApiError(422, "MIX_ROLES", "Select a different linear master for each channel role.")
+    sources = []
+    for asset_id in body.asset_ids:
+        source = get_asset(request, asset_id)
+        ready = source.get("prepared") or {}
+        if source["status"] != "ready" or ready.get("state") != "linear" or source["format"] != "fits":
+            raise ApiError(422, "MIX_INPUT", "All masters must be ready FITS files confirmed as linear.")
+        sources.append({**source, "path": str(cfg.assets_dir / asset_id / source["original_name"])})
+    asset_id = new_id("a_")
+    asset_dir = cfg.assets_dir / asset_id
+    asset_dir.mkdir()
+    out = asset_dir / "original.fits"
+    try:
+        result = await run_worker_task(request, "color_mix", {
+            "sources": sources, "mode": body.mode, "gains": body.gains, "strength": body.strength,
+            "prealigned": body.prealigned, "out_path": str(out),
+        })
+        inspection = await run_in_threadpool(inspect_file, out, cfg.max_pixels)
+        out.chmod(stat.S_IREAD)
+        db.insert("assets", {
+            "id": asset_id, "created_at": now(), "filename": clean_name(f"{Path(sources[0]['filename']).stem} - {body.mode}.fits"),
+            "status": "inspecting", "interpretation": {"state": "linear"}, "regions": [],
+            "original_name": out.name, "format": "fits", "size_bytes": result["size"], "sha256": result["sha256"],
+            "inspection": inspection,
+        })
+    finally:
+        if not db.one("SELECT id FROM assets WHERE id=?", (asset_id,)):
+            if out.exists():
+                out.chmod(stat.S_IWRITE)
+                out.unlink()
+            (asset_dir / "original.partial").unlink(missing_ok=True)
+            asset_dir.rmdir()
+    coord.enqueue_prepare(asset_id)
+    return serialize_asset(db, coord, cfg, get_asset(request, asset_id))
+
+
+def _object_preview(path: Path, regions: list[dict[str, Any]], recipe: ObjectColorRecipe, mask_only: bool,
+                    hubble_strength: float = 0.0) -> bytes:
+    arr = previews.open_display(path)
+    if arr.ndim != 3:
+        raise ProcessingError("MONO_COLOR", "Object Color needs a color image.")
+    stride = max(1, (max(arr.shape[:2]) + 383) // 384)
+    small = arr[::stride, ::stride].astype(np.float32) / 65535
+    valid = (small != 0).any(axis=2)
+    for rect in regions:
+        left, top = (rect["x"] + stride - 1) // stride, (rect["y"] + stride - 1) // stride
+        right = (rect["x"] + rect["w"] + stride - 1) // stride
+        bottom = (rect["y"] + rect["h"] + stride - 1) // stride
+        valid[top:bottom, left:right] = False
+    if not valid.any():
+        raise ProcessingError("NO_VALID_PIXELS", "No unprotected pixels to preview.")
+    stars = detect_stars(small, valid, 1e-6).soft
+    if hubble_strength:
+        if stars is None:
+            raise ProcessingError("NO_PREVIEW_STAR_MASK", "Not enough stars could be detected in the quick preview. Try the full-resolution action.")
+        stats = sky_stats(small, valid & (stars < 0.5))
+        result, mask = hubble_style(np, small, small, stars, valid, tuple(stats.level), max(stats.sigma), hubble_strength)
+    else:
+        sky, sigma = clipped_stats(luminance(np, small)[valid])
+        result, mask = selective_color(np, small, stars if stars is not None else 0.0, valid, sky, sigma, recipe)
+    buf = io.BytesIO()
+    Image.fromarray(np.rint(np.clip(mask if mask_only else result, 0, 1) * 255).astype(np.uint8)).save(buf, "PNG")
+    return buf.getvalue()
+
+
+@router.post("/{asset_id}/object-color-preview")
+async def preview_object_color(request: Request, asset_id: str, body: ObjectColorRecipe,
+                               mask: bool = False, protect_regions: bool = True,
+                               hubble_strength: Annotated[float, Query(ge=0, le=1)] = 0.0) -> Response:
+    asset = get_asset(request, asset_id)
+    if hubble_strength and asset_hubble_input(asset) != "dualband":
+        raise ApiError(422, "PALETTE_INPUT", "Hubble-style needs a confirmed linear H-alpha/OIII color FITS.")
+    try:
+        data = await run_in_threadpool(_object_preview, cfg_of(request).assets_dir / asset_id / "baseline.npy",
+                                       (asset.get("regions") or []) if protect_regions else [], body, mask, hubble_strength)
+    except ProcessingError as exc:
+        raise ApiError(422, exc.code, exc.message) from exc
+    return Response(data, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
 @router.get("/{asset_id}")
 async def get_asset_detail(request: Request, asset_id: str) -> dict[str, Any]:
     return serialize_asset(db_of(request), coord_of(request), cfg_of(request), get_asset(request, asset_id))
@@ -126,8 +256,20 @@ async def patch_interpretation(request: Request, asset_id: str, body: Interpreta
         raise ApiError(409, "ASSET_FAILED", "This file could not be read, so there is nothing to confirm.")
     interp = dict(a["interpretation"] or {})
     changes = body.model_dump(exclude_none=True)
+    if "dualband_confirmed" in changes:
+        detected = asset_hubble_input({**a, "interpretation": {}})
+        if len(changes) != 1 or detected != "unknown":
+            raise ApiError(422, "PALETTE_INPUT", "Only confirm the filter for a ready linear color FITS with an unrecognized filter.")
+        if changes["dualband_confirmed"]:
+            interp["dualband_confirmed"] = True
+        else:
+            interp.pop("dualband_confirmed", None)
+        db.update("assets", asset_id, {"interpretation": interp})
+        return serialize_asset(db, coord, cfg, get_asset(request, asset_id))
     geometry_changed = any(k in changes and changes[k] != interp.get(k) for k in ("hdu", "layout"))
     state_changed = "state" in changes and changes["state"] != interp.get("state")
+    if geometry_changed or state_changed:
+        interp.pop("dualband_confirmed", None)
     interp.update(changes)
     intake = evaluate_intake(a["inspection"], interp)
     values: dict[str, Any] = {"interpretation": interp, "status": "inspecting"}

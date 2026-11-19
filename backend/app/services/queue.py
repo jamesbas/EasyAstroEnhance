@@ -285,14 +285,16 @@ class Coordinator:
 
     def cache_key(self, asset: dict[str, Any], recipe: dict[str, Any], settings: dict[str, Any], planned_backend: str) -> str:
         bg = asset.get("background") if recipe.get("background", {}).get("enabled") else None
+        parsed = parse_recipe(recipe)
         material = {
             "source": asset["sha256"], "engine": PIPELINE_VERSION, "deps": dependency_versions()["packages"],
-            "recipe": parse_recipe(recipe).model_dump(), "interpretation": asset["interpretation"],
+            "recipe": parsed.model_dump(), "interpretation": asset["interpretation"],
             "regions": asset["regions"] if recipe.get("protect_regions", True) else [],
             "background": bg if bg and bg.get("confirmed") else None,
             "frame": (asset.get("prepared") or {}).get("frame"), "backend": planned_backend, "precision": "float32",
             "strip_location": bool(settings.get("strip_location", True)),
             "ai_models": self.ai_model_state(recipe, asset),
+            "catalog_available": bool(parsed.catalog_sha256 and (self.cfg.color_catalog_dir / f"{parsed.catalog_sha256}.csv").is_file()),
         }
         return hashlib.sha256(json.dumps(material, sort_keys=True, default=str).encode()).hexdigest()
 

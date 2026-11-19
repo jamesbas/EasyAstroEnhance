@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, uploadAssets } from './api/client';
 import type { Asset, Interpretation, Question } from './api/types';
+import { ChannelMixDialog, isLinearFits } from './components/ChannelMixDialog';
 import { CompareViewer } from './components/CompareViewer';
 import { EnhancementPanel } from './components/EnhancementPanel';
 import { ExportMenu } from './components/ExportMenu';
@@ -58,9 +59,11 @@ export default function App() {
   const [uploading, setUploading] = useState<{ progress: number; count: number } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [stackOpen, setStackOpen] = useState(false);
+  const [mixOpen, setMixOpen] = useState(false);
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
   const [forced, setForced] = useState<ForcedIntake | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [hubbleStrength, setHubbleStrength] = useState(0.65);
   const [cancelling, setCancelling] = useState(false);
   const [tool, setTool] = useState<ViewerTool>('none');
   const [labelLineY, setLabelLineY] = useState<number | null>(null);
@@ -266,11 +269,11 @@ export default function App() {
 
   // ---- jobs
   const submit = useCallback(
-    async (ids: string[], force: boolean) => {
+    async (ids: string[], force: boolean, hubble = 0) => {
       if (!rec.recipe || ids.length === 0) return;
       setSubmitting(true);
       try {
-        const recipe = rec.recipe;
+        const recipe = hubble > 0 ? { ...rec.recipe, preset: 'custom', hubble_strength: hubble } : rec.recipe;
         const job = await api.createJob({
           request_key: newKey(),
           asset_ids: ids,
@@ -356,6 +359,7 @@ export default function App() {
         <div className="topbar-actions">
           {hasAssets && <UploadPanel variant="compact" onFiles={(f) => void handleFiles(f)} uploading={uploading !== null} />}
           {hasAssets && <button type="button" className="btn" onClick={() => setStackOpen(true)} data-testid="stack-button">Stack frames…</button>}
+          {assets.filter(isLinearFits).length >= 2 && <button type="button" className="btn" onClick={() => setMixOpen(true)}>Combine channels…</button>}
           {appVersion && (
             <span className="version-chip" data-testid="app-version" title={`EasyAstroEnhance version ${appVersion.version} (processing engine; recipe schema ${appVersion.recipeSchema}; stacking ${appVersion.stackVersion})`}>
               v{appVersion.version}
@@ -470,6 +474,10 @@ export default function App() {
               submitting={submitting}
               settingsChanged={settingsChanged}
               onEnhanceSelected={() => void submit(selectedReady, false)}
+              hubbleStrength={hubbleStrength}
+              onHubbleStrength={setHubbleStrength}
+              onEnhanceHubble={primary?.hubble_input === 'dualband' && readySet.has(primary.id)
+                ? () => void submit([primary.id], false, hubbleStrength) : undefined}
               onEnhanceAll={() => void submit([...readySet], false)}
               onReprocess={() => primary && void submit([primary.id], true)}
               jobs={ws.activeJobs}
@@ -521,6 +529,15 @@ export default function App() {
             void refresh();
           }}
         />
+      )}
+      {mixOpen && (
+        <ChannelMixDialog assets={assets} onClose={() => setMixOpen(false)} onCreated={(asset) => {
+          upsert([asset]);
+          choose([asset.id], asset.id);
+          setMixOpen(false);
+          notify('success', 'Color master created. Select a preset and Enhance when ready.');
+          void refresh();
+        }} />
       )}
       {dragging && hasAssets && <div className="drop-overlay" aria-hidden="true"><p>Drop to add photos</p></div>}
       <Toaster />

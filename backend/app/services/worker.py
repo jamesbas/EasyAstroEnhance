@@ -25,6 +25,7 @@ from ..processing.denoise import estimate_noise
 from ..processing.imagedata import Cancelled, ImageData, ProcessingError
 from ..processing.stretch import LinearFrame, fixed_map, to_normalized
 from ..processing.masks import regions_mask, validate_regions
+from ..processing.object_color import hubble_input
 from ..processing.pipeline import (
     AssetContext, ExecutionOptions, baseline_display, choose_backend, estimate_peak_ram_bytes, prepare_linear_frame, run_pipeline,
 )
@@ -153,6 +154,7 @@ def handle_prepare(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
         "notes": image.notes,
         "units": image.units,
         "has_sensitive_metadata": bool(image.header is not None and sensitive_keywords_in(image.header)),
+        "hubble_input": hubble_input(image.header),
         "source_dtype": image.source_dtype,
         "source_bit_depth": image.source_bit_depth,
     }
@@ -246,6 +248,8 @@ def ensure_probe(force: bool = False) -> dict[str, Any]:
 
 def handle_probe(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
     t0 = time.perf_counter()
+    if cfg.cpu_only:
+        return {"ok": False, "status": "unavailable", "note": "This app instance is running in CPU-only mode."}
     info = ensure_probe(force=True)
     info = dict(info)
     info["probe_seconds"] = round(time.perf_counter() - t0, 3)
@@ -308,6 +312,10 @@ def _linear_history(report: dict[str, Any]) -> list[str]:
     if wbop.get("status") == "applied" and wbop.get("parameters"):
         f = wbop["parameters"].get("factors_rgb") or []
         lines.append("White-balance gains R,G,B: " + ", ".join(f"{v:.4f}" for v in f))
+    cat = ops.get("catalog_color") or {}
+    if cat.get("status") == "applied":
+        lines.append("Catalog gains R,G,B: " + ", ".join(f"{v:.4f}" for v in cat["gains_rgb"]))
+        lines.append(f"Offline reference CSV SHA-256: {cat['sha256'][:24]}... (full hash in report)")
     if (ops.get("deconvolution") or {}).get("status") == "applied":
         lines.append("Richardson-Lucy deconvolution applied (see processing.json).")
     if (ops.get("denoise") or {}).get("status") == "applied":
@@ -352,7 +360,7 @@ def handle_enhance(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
     partial.mkdir(parents=True, exist_ok=False)
     try:
         # execution preferences
-        device = settings.get("device", "auto")
+        device = "cpu" if cfg.cpu_only else settings.get("device", "auto")
         gpu_ok = False
         probe_info = None
         if device != "cpu":
@@ -386,12 +394,14 @@ def handle_enhance(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
             progress=ctl.progress,
             backend_factory=factory,
             ai_models_dir=cfg.ai_models_dir,
+            color_catalog_dir=cfg.color_catalog_dir,
         )
         bg = asset.get("background")
         ctx = AssetContext(
             regions=asset.get("regions") or [],
             background=bg if (bg and bg.get("confirmed")) else None,
             frame=(asset.get("prepared") or {}).get("frame"),
+            dualband_confirmed=asset["interpretation"].get("dualband_confirmed") is True,
         )
         label_backend, _ = choose_backend(opts, image.height, image.width, image.channels)
         ctl.label("Processing: GPU + CPU" if label_backend == "gpu" else "Processing: CPU")
@@ -545,7 +555,7 @@ def handle_stack(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
 
     budget = int(psutil.virtual_memory().available * float(settings.get("ram_fraction", cfg.ram_fraction)) * 0.5)
     try:
-        report = run_stack(req, partial, ctl.check, progress, device=settings.get("device", "auto"),
+        report = run_stack(req, partial, ctl.check, progress, device="cpu" if cfg.cpu_only else settings.get("device", "auto"),
                            threads=max(1, min(4, (os.cpu_count() or 2) - 1)), memory_budget_bytes=budget)
         partial.replace(out)
     finally:
@@ -553,7 +563,37 @@ def handle_stack(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
     return {"report": report, "path": str(out), "sha256": sha256_path(out), "size": out.stat().st_size}
 
 
-HANDLERS = {"prepare": handle_prepare, "analysis": handle_analysis, "probe": handle_probe, "enhance": handle_enhance, "stack": handle_stack}
+def handle_color_mix(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
+    import psutil
+    from astropy.io import fits
+    from ..processing.color_mix import combine_channels
+
+    sources = task["sources"]
+    pixels = sum(s["prepared"]["width"] * s["prepared"]["height"] for s in sources)
+    ref = sources[0]["prepared"]
+    w, h = ref["width"], ref["height"]
+    available = int(psutil.virtual_memory().available * cfg.ram_fraction)
+    if 64 * pixels + 192 * w * h > available:
+        raise ProcessingError("MIX_MEMORY", "The channel masters need more memory than is available for this mix.")
+    _disk_check(cfg, w * h, 3)
+    images = []
+    for source in sources:
+        ctl.check()
+        images.append(load_image(cfg, source))
+    rgb, header = combine_channels(images, task["mode"], task["gains"], task["strength"], task["prealigned"], ctl.check)
+    out = Path(task["out_path"])
+    partial = out.with_suffix(".partial")
+    try:
+        fits.PrimaryHDU(np.ascontiguousarray(np.moveaxis(rgb, -1, 0)), header=header).writeto(partial, checksum=True)
+        ctl.check()
+        partial.replace(out)
+        return {"sha256": sha256_path(out), "size": out.stat().st_size}
+    finally:
+        partial.unlink(missing_ok=True)
+
+
+HANDLERS = {"prepare": handle_prepare, "analysis": handle_analysis, "probe": handle_probe, "enhance": handle_enhance,
+            "stack": handle_stack, "color_mix": handle_color_mix}
 
 
 def worker_main(task_q, result_q, cancel_event, cfg: Config) -> None:

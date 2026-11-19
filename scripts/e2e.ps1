@@ -21,8 +21,11 @@ try {
         $sample = Get-ChildItem (Join-Path $root 'samplepics') -Filter *.jpg -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($sample) { $env:EAE_TEST_JPEG = $sample.FullName }
         $stackDir = Join-Path $data 'stack-subs\M 99_sub'
-        & $py -c "import sys; sys.path[:0] = [r'$(Join-Path $root 'backend')', r'$(Join-Path $root 'backend\tests')']; from pathlib import Path; from stack_fixtures import _make_subs; _make_subs(Path(r'$stackDir'), n=6)"
-        if ($LASTEXITCODE -eq 0) { $env:EAE_STACK_DIR = $stackDir }
+        $colorDir = Join-Path $data 'color-fixtures'
+        & $py -c "import sys; sys.path[:0] = [r'$(Join-Path $root 'backend')', r'$(Join-Path $root 'backend\tests')']; from pathlib import Path; from stack_fixtures import _make_subs; from color_fixtures import color_test_files; _make_subs(Path(r'$stackDir'), n=6); color_test_files(Path(r'$colorDir'))"
+        if ($LASTEXITCODE -ne 0) { throw 'Could not generate the synthetic browser test fixtures.' }
+        $env:EAE_STACK_DIR = $stackDir
+        $env:EAE_COLOR_DIR = $colorDir
         npx playwright test @Specs
         if ($LASTEXITCODE -ne 0) { throw 'Playwright tests failed' }
     } finally { Pop-Location }

@@ -192,7 +192,7 @@ def test_sessions_merge_nights(tmp_path):
         hdu.writeto(folder / f"night{k}.fit")
     p = plan(StackRequest(folder=str(folder)))
     assert p["mode"] == "sessions" and p["lights"]["count"] == 3 and not p["drizzle_available"]
-    rep = run_stack(StackRequest(folder=str(folder)), tmp_path / "m.fits", lambda: None, lambda *_: None)
+    rep = run_stack(StackRequest(folder=str(folder)), tmp_path / "m.fits", lambda: None, lambda *_: None, device="cpu")
     assert rep["frames_used"] == 3
     img = _read_stack(tmp_path / "m.fits")
     sky = np.nanmedian(img[30:-30, 30:-30].reshape(-1, 3), axis=0)
@@ -209,7 +209,7 @@ def test_real_seestar_subs_stack(tmp_path):
     """77 real Seestar S30 subs (read-only): cloudy frames at the end are skipped, the rest align across field rotation."""
     if not SEESTAR_SUBS.is_dir():
         pytest.skip(f"{SEESTAR_SUBS} not available")
-    rep = run_stack(StackRequest(folder=str(SEESTAR_SUBS)), tmp_path / "m42.fits", lambda: None, lambda *_: None)
+    rep = run_stack(StackRequest(folder=str(SEESTAR_SUBS)), tmp_path / "m42.fits", lambda: None, lambda *_: None, device="cpu")
     assert rep["frames_total"] == 77 and 55 <= rep["frames_used"] <= 70
     assert all("clouds" in r["reason"] or "bloated" in r["reason"] for r in rep["rejected_frames"])
     assert rep["registration"]["median_rms_px"] < 0.6

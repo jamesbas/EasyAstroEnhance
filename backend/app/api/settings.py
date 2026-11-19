@@ -24,10 +24,12 @@ def _compute_view(request: Request) -> dict[str, Any]:
     snap = settings_snapshot(db, cfg)
     probe = coord.probe_info
     gpu_ok = bool(probe and probe.get("ok"))
-    pref = snap["device"]
-    resolved = "Processing: GPU + CPU" if (gpu_ok and pref in ("auto", "gpu")) else "Processing: CPU"
+    pref = db.get_setting("compute.device", "auto")
+    resolved = "Processing: GPU + CPU" if (gpu_ok and snap["device"] in ("auto", "gpu")) else "Processing: CPU"
     note = None
-    if probe is None:
+    if cfg.cpu_only:
+        note = "CPU-only mode is active for this app instance."
+    elif probe is None:
         note = "GPU not checked yet. Use Check GPU setup."
     elif not gpu_ok:
         note = probe.get("note")

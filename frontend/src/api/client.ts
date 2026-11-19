@@ -78,16 +78,31 @@ async function rawRequest<T>(method: string, path: string, body?: unknown, token
 
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  if (!MUTATING.has(method)) return rawRequest<T>(method, path);
+async function authenticated<T>(send: (token: string) => Promise<T>): Promise<T> {
   try {
-    return await rawRequest<T>(method, path, body, await getToken());
+    return await send(await getToken());
   } catch (err) {
     if (err instanceof ApiError && err.status === 403 && err.code === 'TOKEN_INVALID') {
-      return rawRequest<T>(method, path, body, await getToken(true));
+      return send(await getToken(true));
     }
     throw err;
   }
+}
+
+async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  return MUTATING.has(method)
+    ? authenticated((token) => rawRequest<T>(method, path, body, token))
+    : rawRequest<T>(method, path);
+}
+
+async function postFileOrPreview(path: string, body: FormData | string, signal?: AbortSignal): Promise<Response> {
+  return authenticated(async (token) => {
+    const headers: Record<string, string> = { [TOKEN_HEADER]: token };
+    if (typeof body === 'string') headers['Content-Type'] = 'application/json';
+    const res = await fetch(`${API}${path}`, { method: 'POST', headers, body, signal, cache: 'no-store' });
+    if (!res.ok) throw await parseError(res);
+    return res;
+  });
 }
 
 function xhrUpload(files: File[], token: string, onProgress: (fraction: number) => void): Promise<UploadResult> {
@@ -138,6 +153,16 @@ export const api = {
   deleteAsset: (id: string) => request<{ deleted: string; note: string }>('DELETE', `/assets/${id}`),
   setInterpretation: (id: string, body: Interpretation) => request<Asset>('PATCH', `/assets/${id}/interpretation`, body),
   setRegions: (id: string, regions: Rect[]) => request<Asset>('PUT', `/assets/${id}/regions`, { regions }),
+  importCatalog: async (file: File): Promise<{ sha256: string; name: string; stars: number }> => {
+    const form = new FormData();
+    form.append('file', file);
+    return (await postFileOrPreview('/assets/color-catalog', form)).json();
+  },
+  colorMix: (body: import('./types').ColorMixBody) => request<Asset>('POST', '/assets/color-mix', body),
+  objectColorPreview: async (id: string, color: import('./types').ObjectColorRecipe, mask: boolean, protect: boolean,
+    signal: AbortSignal, hubbleStrength = 0) =>
+    (await postFileOrPreview(`/assets/${id}/object-color-preview?mask=${mask}&protect_regions=${protect}&hubble_strength=${hubbleStrength}`,
+      JSON.stringify(color), signal)).blob(),
   suggestBackground: (id: string) => request<BackgroundSuggestion>('GET', `/assets/${id}/background/suggest`),
   previewBackground: (id: string, body: BackgroundBody) => request<BackgroundPreview>('POST', `/assets/${id}/background/preview`, body),
   confirmBackground: (id: string, body: BackgroundBody) => request<Asset>('PUT', `/assets/${id}/background`, body),

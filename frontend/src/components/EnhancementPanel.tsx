@@ -6,6 +6,7 @@ import type { BgDraft, ViewerTool } from '../types/ui';
 import { AdvancedPanel } from './AdvancedPanel';
 import { AIToolsPanel } from './AIToolsPanel';
 import { BackgroundPanel } from './BackgroundPanel';
+import { ColorTools } from './ColorTools';
 import { StrengthButtons, Switch } from './Controls';
 import { JobStatus } from './JobStatus';
 import { LabelRegionTool } from './LabelRegionTool';
@@ -37,6 +38,9 @@ export interface EnhancementPanelProps {
   submitting: boolean;
   settingsChanged: boolean;
   onEnhanceSelected: () => void;
+  hubbleStrength: number;
+  onHubbleStrength: (strength: number) => void;
+  onEnhanceHubble?: () => void;
   onEnhanceAll: () => void;
   onReprocess: () => void;
   jobs: Job[];
@@ -105,7 +109,7 @@ export function EnhancementPanel(p: EnhancementPanelProps) {
       <div className="panel-scroll">
         <PresetBar presets={p.presets} presetId={p.presetId} disabled={false} onSelect={p.selectPreset} onSave={p.savePreset} onChanged={p.reloadPresets} />
 
-        <LookControls look={recipe.look} stretchOn={recipe.tone.enabled} mono={mono} edit={p.edit} />
+        <LookControls look={recipe.look} stretchOn={recipe.tone.enabled && !(recipe.focus_stretch.enabled && asset?.baseline?.domain === 'linear')} mono={mono} edit={p.edit} />
 
         <AIToolsPanel ai={recipe.ai} asset={asset} models={p.aiModels} onToggle={p.setAI} />
 
@@ -133,6 +137,8 @@ export function EnhancementPanel(p: EnhancementPanelProps) {
         </div>
 
         <ToneControls tone={recipe.tone} histogram={asset?.baseline?.histogram ?? null} edit={p.edit} />
+        <ColorTools asset={asset} recipe={recipe} edit={p.edit} busy={busy} hubbleStrength={p.hubbleStrength}
+          onHubbleStrength={p.onHubbleStrength} onAssetUpdated={p.onAssetUpdated} />
 
         {asset && (
           <LabelRegionTool asset={asset} tool={p.tool} lineY={p.labelLineY} onTool={p.onTool} onLineY={p.onLabelLine} onAssetUpdated={p.onAssetUpdated} />
@@ -152,6 +158,12 @@ export function EnhancementPanel(p: EnhancementPanelProps) {
           Enhance selected
           <small>{p.selectedReady} selected</small>
         </button>
+        {p.onEnhanceHubble && (
+          <button type="button" className="btn big" disabled={busy} onClick={p.onEnhanceHubble}>
+            Enhance Hubble-style
+            <small>This image only · Gold and teal, not SHO</small>
+          </button>
+        )}
         <button type="button" className="btn big" disabled={busy || p.allReady === 0} onClick={p.onEnhanceAll} data-testid="enhance-all">
           Enhance all ready images
           <small>{p.allReady} ready</small>

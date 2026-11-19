@@ -77,6 +77,9 @@ own files elsewhere are never touched. Limits (env overrides): 20 files per batc
 .\scripts\test.ps1 -RealFiles    # only tests that use your real images (.\samplepics and your Seestar folder)
 ```
 
+For an isolated CPU-only browser run, set `$env:EASYASTRO_CPU_ONLY='1'` before running
+`.\scripts\e2e.ps1 -Specs color,intake`. This setting applies to the test process and its server, not a running copy of the app.
+
 Direct commands: `cd backend; uv run --frozen pytest -q` · `uv run --frozen pytest -m "not gpu"` ·
 `cd frontend; npm run typecheck; npx playwright test`.
 Tests marked `aimodels` use the real downloaded AI models (default `%LOCALAPPDATA%\EasyAstroEnhance\ai-models`, or
@@ -115,7 +118,7 @@ frontend/ (React + TypeScript + Vite)         backend/app/
   atomic rename. Identical settings reuse the cached run (cache key: source SHA-256, engine + dependency versions,
   canonical recipe, per-file regions/background model, backend, precision); **Reprocess** always makes a new run.
 
-### Processing method disclosure (engine 1.2.0, recipe schema 4 — one-button Enhance)
+### Processing method disclosure (engine 1.3.1, recipe schema 6 — one-button Enhance)
 
 Pick a **preset** (Natural, Vivid, Faint detail, Bright core (HDR), Star field, Seestar match), press **Enhance**.
 Six sliders (Background, Stretch, Contrast/Pop, Color, Detail, Noise reduction) and a *Protect bright cores* switch tune
@@ -150,10 +153,46 @@ classical algorithms — see [improve-enhance.md](improve-enhance.md). No 8-bit 
 * **Guardrail:** new black/white clipping (per-pixel transitions vs the original display; pixels already clipped in any
   channel of the original are not new) above 0.1 % halves the finishing strengths once and reruns; if still above, the
   result is flagged “review”.
-* **Not implemented by design:** generative processing, AI sharpening/deconvolution, star removal or reduction in the
-  output, catalog/plate-solve photometric calibration, cubes, narrowband palettes.
+* **Not implemented by design:** generative processing, AI sharpening/deconvolution, starless output, blind plate
+  solving, and cubes.
 
-### AI tools (optional, engine 1.2.0, recipe schema 4)
+### Optional color and stretch tools
+
+These controls are off or neutral in the built-in presets. You can still add a file and press **Enhance** without
+opening any of them. Saved presets from recipe schemas 3–5 migrate with newly added options off.
+
+* **Enhance Hubble-style:** on a linear H-alpha/OIII color FITS (including Seestar `LP`), click the button next to
+  the normal Enhance actions. It processes only the image you're viewing, using a default 65% gold-and-teal
+  blend. There is no CSV, WCS requirement or restacking. **Object Color → Hubble-style (dual-band)** has an optional
+  strength slider and thumbnail preview. If the filter is unrecognized, use **Confirm Hα/OIII filter** there only
+  if you know that's how the image was captured. Known broadband files (including `IRCUT`) are not eligible.
+  The blend protects stars, faint sky and highlights and affects only the display, not the linear FITS. This is
+  **Hubble-style, not SHO**: no sulfur signal is inferred. Normal **Enhance selected** stays unchanged.
+* **Object Color:** adjust red/orange, green/teal or blue/violet independently. The mask favors existing color in
+  extended signal and fades out over dark sky, detected stars and highlights. **Show color mask** displays a live
+  thumbnail based on the original display; it is not an exact preview of the full enhancement. Enhance applies the
+  adjustment after the regular display finishing. If stars cannot be protected reliably, the full run skips the
+  adjustment and explains why. It never changes the processed-linear FITS.
+* **Catalog color:** on a solved, linear **broadband RGB FITS**, import a UTF-8 CSV with the header
+  `ra_deg,dec_deg,r_over_g,b_over_g`. Supply ICRS coordinates in degrees and **positive linear reference flux ratios**
+  in your intended RGB passbands, for stars in this field. Raw Gaia BP/RP magnitudes are not RGB ratios. The app
+  does not ship a catalog or solve the image. It uses the FITS sky solution (WCS) to cross-match isolated, unsaturated
+  stars, requires at least eight consistent matches, and fits relative RGB gains. If the WCS, catalog or matches are
+  insufficient, the report says why and the normal field-star white balance still runs if enabled. No network is
+  used. Imported CSVs (up to 2 MiB) stay in the app's `color-catalogs` directory; presets reference them by SHA-256.
+* **Stretch method → Manual focus:** for linear data, pick the part of the brightness range where the stretch
+  is strongest and tune its strength. Shadow and highlight color protection are separate options. Sky brightness is
+  still anchored to **Background**. Run Enhance and compare with an earlier run; **Automatic** is still the default.
+* **Combine channels…:** add and confirm your FITS masters as linear, then choose RGB, LRGB, HOO, SHO, SHO from
+  two dual-band stacks, or Ha into broadband red. Assign each master to its role and optionally scale it. The
+  first input defines the output grid; mismatched solved inputs are resampled using their sky coordinates.
+  Without WCS, explicitly confirm that same-size inputs are already aligned. Only valid overlap is kept; other
+  pixels are marked missing, not filled. Dual-band SHO assumes Ha/SII is in red and estimates OIII from green
+  and blue; Ha into broadband uses a lighten blend, not continuum subtraction. A new, unenhanced linear FITS
+  is added to the queue with its source hashes and mix settings in the header. Mixed-filter inputs keep their
+  palette instead of receiving automatic stellar white balance or green removal.
+
+### AI tools (optional)
 
 Under **AI tools** in the Enhancement panel, three switches are all off by default:
 
@@ -178,8 +217,8 @@ Under **AI tools** in the Enhancement panel, three switches are all off by defau
 * **Limits:** these networks predict pixel values. Background extraction can darken the faintest outer halo of a
   frame-filling galaxy, and full-strength denoising can soften the faintest structure. Compare before and after.
 
-This is **display enhancement, not scientific calibration**: neutralization and star-based white balance are not
-photometric colour calibration and a sharper look is not extra measured resolution. Every run’s `processing.json`
+This is **display enhancement, not absolute flux calibration**: normal star-based white balance is not photometric
+calibration. Optional catalog calibration fits relative RGB only, and a sharper look is not extra measured resolution. Every run’s `processing.json`
 records source SHA-256, engine/dependency versions, requested vs applied recipe, every measured parameter (sky levels,
 pedestal, gradient model, white-balance gains, stretch D/b/p/floor/MTF, detectors), skipped steps with reasons,
 clipping transitions, noise estimate (with its limitations), backend/device/transfers/timings and export hashes.

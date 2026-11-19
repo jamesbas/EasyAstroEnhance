@@ -16,9 +16,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-PIPELINE_VERSION = "1.2.0"
-RECIPE_SCHEMA_VERSION = 4
-MIGRATABLE_SCHEMAS = {3}
+PIPELINE_VERSION = "1.3.1"
+RECIPE_SCHEMA_VERSION = 6
+MIGRATABLE_SCHEMAS = {3, 4, 5}
 
 Strength = Literal["gentle", "balanced", "strong"]
 
@@ -101,6 +101,24 @@ class AIRecipe(_Strict):
     stars: bool = False  # Dark Star separation: finish the starless image, add the stars back (linear only)
 
 
+class ObjectColorRecipe(_Strict):
+    reds: float = Field(0.0, ge=-1.0, le=1.0)
+    blues: float = Field(0.0, ge=-1.0, le=1.0)
+    greens: float = Field(0.0, ge=-1.0, le=1.0)
+
+    @property
+    def active(self) -> bool:
+        return bool(self.reds or self.blues or self.greens)
+
+
+class FocusStretchRecipe(_Strict):
+    enabled: bool = False
+    strength: float = Field(0.5, ge=0.0, le=1.0)
+    focus: float = Field(0.2, ge=0.0, le=1.0)
+    protect_shadows: bool = True
+    protect_highlights: bool = True
+
+
 class Recipe(_Strict):
     schema_version: int = RECIPE_SCHEMA_VERSION
     preset: str = "natural"
@@ -111,6 +129,10 @@ class Recipe(_Strict):
     protect_regions: bool = True
     advanced: AdvancedRecipe = AdvancedRecipe()
     ai: AIRecipe = AIRecipe()
+    object_color: ObjectColorRecipe = ObjectColorRecipe()
+    focus_stretch: FocusStretchRecipe = FocusStretchRecipe()
+    catalog_sha256: str | None = Field(None, pattern=r"^[0-9a-f]{64}$")
+    hubble_strength: float = Field(0.0, ge=0.0, le=1.0)
 
 
 class RecipeCompatibilityError(ValueError):

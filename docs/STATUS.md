@@ -1,7 +1,22 @@
 # Status: verified vs. not yet verified
 
-Engine **1.2.0** · recipe schema **4** (one-button Enhance + optional AI tools) · measured on the target PC (Windows 11, Intel Core Ultra 9 285K,
+Historical performance baselines: engine **1.2.0**, recipe schema **4** · measured on the target PC (Windows 11, Intel Core Ultra 9 285K,
 64 GB RAM, NVIDIA GeForce RTX 5070 Ti 16 GB, driver 610.62 / CUDA 13.3, Python 3.12.10).
+
+## Engine 1.3 — optional color workflow
+
+The CPU checks cover selective hue changes with star, sky and protected-region masking; the manual focus
+curve's monotonicity and sky anchor; catalog RGB gain recovery and fallback on synthetic solved FITS; channel
+assignment, WCS alignment across different grid sizes, source SHA-256 preservation and publication as a new
+linear FITS. Browser tests exercise the live color mask, local catalog import, focused stretch and HOO workflow.
+On a real Seestar M31 stack, the Object Color and Manual focus previews were reviewed at fit and 100%;
+both left the processed-linear array identical to the automatic run, and the original file hash was unchanged.
+Real reference-star/dual-band datasets and GPU execution of the new controls were not used for these tests.
+
+Engine 1.3.1: visually reviewed the single-stack Hubble-style palette on a real Seestar M42 LP stack. The
+two renders used the same linear pipeline, the processed-linear arrays were pixel-identical and the original's
+SHA-256 was unchanged. CPU tests also verify bright-star/sky masking, the IR-cut guard, per-file confirmation,
+and the one-click browser action. GPU parity for the new palette was not tested.
 
 ## Engine 1.1 (improve-enhance.md, section 8) — verified on real Seestar stacks
 
@@ -95,8 +110,9 @@ context, kernel compile) happens once in the worker on the first GPU run or prob
 * FITS rows are treated as bottom-up unless `ROWORDER` says otherwise; ZWO Seestar files without `ROWORDER` are kept as
   stored (verified against the telescope's JPG). Assets prepared by engine 1.0 are re-prepared once at start-up; their
   label rectangles and sky samples are cleared if the display orientation changed.
-* Star-based white balance assumes the average isolated field star is white; it is bounded (±25 %) and skipped when the
-  reference is unreliable, but it is not photometric calibration (no plate solve / catalog).
+* Default white balance assumes the typical isolated field star is white. It is not photometric calibration.
+  Optional offline catalog color uses relative RGB ratios, requires an existing celestial FITS solution and does not
+  ship a reference catalog.
 * Field-rotation borders are excluded from statistics but stay visible (never cropped automatically).
 * Deconvolution is experimental (opt-in, Gaussian PSF, SNR-gated); validate on your own data before relying on it.
 * ICC profiles on 16-bit TIFF are not applied (no precision-preserving conversion path); disclosed in the report.
@@ -108,6 +124,6 @@ context, kernel compile) happens once in the worker on the first GPU run or prob
 * AI tools: GraXpert models are CC BY-NC-SA 4.0 (non-commercial use). AI background extraction can darken the faintest
   outer halo of a frame-filling galaxy; AI star separation leaves very large saturated stars partly in the starless
   layer (they are added back unchanged). AI tools other than the three listed stay out of scope.
-* Deferred by design: cubes, plate solving, photometric calibration, other learned/AI
-  processing, star reduction/removal, narrowband palettes, installers, remote access.
+* Deferred by design: cubes, plate solving, absolute flux calibration, additional learned processing,
+  star removal/replacement in final exports, installers, remote access.
 * Swagger UI is disabled (it loads assets from a CDN); the OpenAPI schema is at `/api/v1/openapi.json`.

@@ -53,7 +53,7 @@ async def run_worker_task(request: Request, kind: str, payload: dict[str, Any], 
 
 def settings_snapshot(db: Database, cfg: Config) -> dict[str, Any]:
     return {
-        "device": db.get_setting("compute.device", "auto"),
+        "device": "cpu" if cfg.cpu_only else db.get_setting("compute.device", "auto"),
         "gpu_memory_fraction": min(float(db.get_setting("compute.gpu_memory_fraction", cfg.gpu_memory_fraction)), 0.7),
         "ram_fraction": float(db.get_setting("compute.ram_fraction", cfg.ram_fraction)),
         "gpu_threshold_pixels": cfg.gpu_threshold_pixels,
@@ -106,6 +106,17 @@ def serialize_job(db: Database, coord: Coordinator, job: dict[str, Any]) -> dict
     }
 
 
+def asset_hubble_input(a: dict[str, Any]) -> str:
+    prepared = a.get("prepared") or {}
+    if (a["status"] != "ready" or a["format"] != "fits" or prepared.get("state") != "linear"
+            or prepared.get("channel_layout") != "rgb"):
+        return "unsupported"
+    detected = prepared.get("hubble_input", "unknown")
+    if detected == "unknown" and (a.get("interpretation") or {}).get("dualband_confirmed") is True:
+        return "dualband"
+    return detected
+
+
 def serialize_asset(db: Database, coord: Coordinator, cfg: Config, a: dict[str, Any]) -> dict[str, Any]:
     insp = a.get("inspection") or {}
     prepared = a.get("prepared") or {}
@@ -143,6 +154,7 @@ def serialize_asset(db: Database, coord: Coordinator, cfg: Config, a: dict[str, 
     return {
         "id": a["id"], "filename": a["filename"], "format": a["format"], "size_bytes": a["size_bytes"], "sha256": a["sha256"],
         "status": status, "status_label": label, "error": a.get("error"),
+        "hubble_input": asset_hubble_input(a),
         "width": prepared.get("width") or insp.get("width"), "height": prepared.get("height") or insp.get("height"),
         "channel_layout": prepared.get("channel_layout") or insp.get("channel_layout"), "bit_depth": insp.get("bit_depth"),
         "questions": (intake or {}).get("questions", []), "interpretation": a["interpretation"] or {},

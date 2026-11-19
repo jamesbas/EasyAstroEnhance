@@ -35,21 +35,23 @@ from .ai.runtime import Runner
 from .ai.tools import AIStepInfo, ai_background, ai_denoise, separate_stars, timed
 from .backends import Backend, BackendUnavailable, RecoverableBackendError, get_backend
 from .backends.base import kernel_radius
+from .catalog_color import catalog_balance
 from .color import gamut_fit, luminance, reconstruct_rgb
 from .deconv import DEFAULT_ITERATIONS, DeconvParams, deconvolve, estimate_psf_sigma
 from .denoise import DenoiseParams, denoise, denoise_params, estimate_noise, estimate_wavelet_noise
 from .diagnostics import clip_report, merge_clip_counts
 from .imagedata import Cancelled, ImageData, ProcessingError
 from .masks import masked_gaussian, region_summary, regions_mask, validate_regions
+from .object_color import hubble_input, hubble_style, selective_color
 from .recipe import (
     BACKGROUND_STRENGTH, PIPELINE_VERSION, POP_PER_CONTRAST, RENDERED_BASE_GAIN, SATURATION_PER_COLOR,
-    STRETCH_DECADES_PER_UNIT, Recipe,
+    STRETCH_DECADES_PER_UNIT, ObjectColorRecipe, Recipe,
 )
 from .report import dependency_versions
 from .star_protection import StarMask, detect_stars
 from .stretch import (
     LinearFrame, StretchParams, apply_stretch, derive_frame, derive_normalization, fixed_map, from_normalized, mtf,
-    rendered_sky_balance, solve_stretch, stretch_statistics, to_normalized,
+    rendered_sky_balance, solve_focus, solve_stretch, stretch_statistics, to_normalized,
 )
 from .tiling import run_tiled
 from .tone import ManualTone, apply_manual, rational_gain, smoothstep, validate_monotonic
@@ -74,6 +76,7 @@ class AssetContext:
     regions: list[dict[str, Any]] = field(default_factory=list)
     background: dict[str, Any] | None = None
     frame: dict[str, Any] | None = None
+    dualband_confirmed: bool = False
 
 
 @dataclass
@@ -89,6 +92,7 @@ class ExecutionOptions:
     progress: Callable[[str], None] | None = None
     backend_factory: Callable[[str], Backend] | None = None
     ai_models_dir: Path | None = None
+    color_catalog_dir: Path | None = None
 
 
 @dataclass
@@ -154,6 +158,11 @@ class GroupB:
     detail: fin.DetailParams | None = None
     scnr_amount: float = 0.0
     saturation: float = 1.0
+    object_color: ObjectColorRecipe | None = None
+    object_scale: float = 1.0
+    hubble_strength: float = 0.0
+    hubble_sky: tuple[float, ...] = (0.0, 0.0, 0.0)
+    hubble_sigma: float = 0.0
     separated: bool = False  # AI star separation: x is the starless image, "full" the image with stars
 
     @property
@@ -161,6 +170,7 @@ class GroupB:
         return bool(
             self.tone_enabled or not self.manual.neutral or self.detail is not None or self.saturation > 1.0
             or self.hdr_amount > 0 or self.pop_a > 0 or self.scnr_amount > 0 or self.star_amount > 0
+            or self.object_color is not None or self.hubble_strength > 0
         )
 
     @property
@@ -321,6 +331,10 @@ def _group_b(be: Backend, tile_in: dict[str, np.ndarray], inner: tuple[int, int,
                 y = fin.scnr(xp, y, P.scnr_amount)
             y = gamut_fit(xp, y)
             y = fin.protected_saturate(xp, y, P.saturation, P.sky_disp, P.sky_sd)
+            if P.object_color is not None:
+                y, _ = selective_color(xp, y, star, w, P.sky_disp, P.sky_sd, P.object_color, P.object_scale)
+            if P.hubble_strength > 0:
+                y, _ = hubble_style(xp, y, x, star, w, P.hubble_sky, P.hubble_sigma, P.hubble_strength * P.object_scale)
     else:
         y = rgb0
     if stars_disp is not None:  # stars added back over the finished starless image
@@ -378,7 +392,14 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
     manual = ManualTone(recipe.tone.brightness_ev, recipe.tone.shadows, recipe.tone.highlights, recipe.tone.black_point)
     validate_monotonic(manual)
     tone_stage = recipe.tone.enabled or not manual.neutral
-    color_ops = rgb and (look.color > 0 or auto.green_removal or (auto.white_balance and mode == "linear"))
+    palette = image.header.get("EAEMIX") if image.header is not None else None
+    narrowband = palette in ("HOO", "SHO", "DUAL-SHO", "HA-RGB")
+    filter_kind = hubble_input(image.header, ctx.dualband_confirmed) if recipe.hubble_strength or recipe.catalog_sha256 else None
+    hubble_ready = bool(filter_kind == "dualband" and mode == "linear" and rgb and image.source_format == "fits")
+    catalog_eligible = not narrowband and filter_kind not in ("dualband", "unsupported")
+    color_ops = rgb and (look.color > 0 or auto.green_removal or recipe.object_color.active
+                         or hubble_ready
+                         or ((auto.white_balance or recipe.catalog_sha256) and mode == "linear"))
     is_noop = not (
         tone_stage or look.noise > 0 or look.contrast > 0 or look.detail > 0 or color_ops or recipe.background.enabled
         or auto.neutralize or (auto.gradient and mode == "linear") or adv.deconvolution
@@ -395,7 +416,9 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
         stat_w = weight
 
     star: StarMask | None = None
-    need_star = not is_noop and (look.noise > 0 or look.detail > 0 or auto.star_stretch or auto.white_balance or adv.deconvolution or auto.gradient)
+    need_star = not is_noop and (look.noise > 0 or look.detail > 0 or auto.star_stretch or auto.white_balance
+                                or adv.deconvolution or auto.gradient or recipe.object_color.active or recipe.catalog_sha256
+                                or hubble_ready)
     if need_star:
         progress("Finding stars")
         star = timings.run("star detection", "cpu", lambda: detect_stars(work, stat_w, STAT_FLOOR), note="global connected components")
@@ -488,16 +511,31 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
     neutral_status: dict[str, Any] = {"status": "off", "reason": None}
     wb = lp.WhiteBalance(False, reason=None)
     wb_status: dict[str, Any] = {"status": "off", "reason": None}
+    catalog = {"status": "off", "reason": None}
+    if recipe.catalog_sha256:
+        catalog = {"status": "skipped", "sha256": recipe.catalog_sha256,
+                   "reason": ("Catalog calibration is for broadband; preserving the chosen filter mix." if not catalog_eligible else
+                              "Catalog calibration requires a linear broadband RGB FITS and background neutralization.")}
     prepped = base
     if auto.neutralize and sky is not None:
         if mode == "linear":
             A.sky = np.array(sky.level, dtype=np.float32)
             A.pedestal = float(lp.PEDESTAL_SIGMAS * max(sky.sigma))
             neutral_status = {"status": "applied", "reason": None}
-            if rgb and auto.white_balance:
+            if rgb and not narrowband and (auto.white_balance or recipe.catalog_sha256):
                 progress("Balancing color")
                 saturated = (work >= lp.SATURATION_LEVEL).any(axis=2)
                 sig_l = float(np.mean(sky.sigma)) / np.sqrt(3.0)
+                if recipe.catalog_sha256 and catalog_eligible:
+                    catalog = timings.run(
+                        "catalog color", "cpu",
+                        lambda: catalog_balance(image, base - A.sky, star_hard, saturated, stat_w, sig_l,
+                                                opts.color_catalog_dir, recipe.catalog_sha256),
+                    )
+                if catalog["status"] == "applied":
+                    A.gains = np.asarray(catalog["gains_rgb"], dtype=np.float32)
+                    wb_status = {"status": "inactive", "reason": "Replaced by offline catalog calibration."}
+            if rgb and not narrowband and auto.white_balance and catalog["status"] != "applied":
                 wb = timings.run(
                     "white balance", "cpu",
                     lambda: lp.star_white_balance(base - A.sky, star_hard, saturated, sig_l, adv.white_balance_limit or lp.WB_DEFAULT_LIMIT),
@@ -516,7 +554,8 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
         else:
             neutral_status = {"status": "skipped", "reason": "Monochrome image: there is no color cast to neutralize."}
     if rgb and auto.white_balance and mode == "linear" and wb_status["status"] == "off" and not is_noop:
-        wb_status = {"status": "skipped", "reason": "White balance needs background neutralization, which is switched off." if not auto.neutralize else "Monochrome image."}
+        wb_status = {"status": "skipped", "reason": "Preserving the selected narrowband palette." if narrowband else
+                     "White balance needs background neutralization, which is switched off."}
     elif rgb and auto.white_balance and mode == "rendered" and not is_noop:
         wb_status = {"status": "inactive", "reason": "Star-based white balance runs on linear stacks only; this image is already processed."}
 
@@ -628,6 +667,8 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
     progress("Choosing the stretch")
     sp: StretchParams | None = None
     B = GroupB(mode=mode, channels=channels, frame=frame, tone_enabled=recipe.tone.enabled, manual=manual)
+    focus = recipe.focus_stretch
+    focus_active = focus.enabled and mode == "linear" and recipe.tone.enabled
     y0: np.ndarray
     if mode == "linear":
         if recipe.tone.enabled:
@@ -642,10 +683,14 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
                                                     "used": max(sig_l, sig_floor)}
                 sig_l = max(sig_l, sig_floor)
             white = _white_level(proc, A, rgb)
-            sp = solve_stretch(
-                sky_l, sig_l, hi_l, white, look.background, protect_cores=look.protect_cores, amount=look.stretch,
-                log_d=adv.stretch_log_d, b=adv.stretch_b, p=adv.highlight_convergence, decades_per_unit=STRETCH_DECADES_PER_UNIT,
-            )
+            if focus_active:
+                sp = solve_focus(sky_l, sig_l, hi_l, white, look.background, focus.strength, focus.focus,
+                                 focus.protect_shadows, focus.protect_highlights)
+            else:
+                sp = solve_stretch(
+                    sky_l, sig_l, hi_l, white, look.background, protect_cores=look.protect_cores, amount=look.stretch,
+                    log_d=adv.stretch_log_d, b=adv.stretch_b, p=adv.highlight_convergence, decades_per_unit=STRETCH_DECADES_PER_UNIT,
+                )
             B.sp = sp
             y0 = timings.run("display preview", "cpu", lambda: apply_stretch(np, disp_src, sp))
             B.sky_disp, B.sky_sd = sp.target, sp.sky_display_sigma
@@ -689,7 +734,9 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
         else:
             hdr_status = {"status": "skipped", "reason": "No bright extended core was found, so core compression is not needed."}
     scnr_status: dict[str, Any] = {"status": "off", "reason": None}
-    if rgb and auto.green_removal and not is_noop:
+    if narrowband and auto.green_removal:
+        scnr_status = {"status": "skipped", "reason": "Preserving the selected narrowband palette."}
+    elif rgb and auto.green_removal and not is_noop:
         excess = fin.green_excess(y0, use_ns, B.sky_disp, B.sky_sd)
         decisions["green_excess"] = excess
         if excess > fin.SCNR_DETECT_EXCESS:
@@ -703,6 +750,13 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
         B.detail = fin.DetailParams(look.detail, n_d, dn.lum)
     B.pop_a = POP_PER_CONTRAST * look.contrast
     B.saturation = 1.0 + SATURATION_PER_COLOR * look.color if rgb else 1.0
+    if rgb and recipe.object_color.active and (star_soft is not None or stars_sep):
+        B.object_color = recipe.object_color
+    if hubble_ready and (star_soft is not None or stars_sep):
+        palette_stats = lp.sky_stats(disp_src, use_ns if use_ns.any() else stat_w)
+        B.hubble_strength = recipe.hubble_strength
+        B.hubble_sky = tuple(palette_stats.level)
+        B.hubble_sigma = max(palette_stats.sigma)
     del y0, Y0
 
     # ---------------------------------------------------------------- pixel group B with clipping guardrail
@@ -716,6 +770,7 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
         attempt += 1
         B.pop_a = base_vals["pop_a"] * reduction
         B.saturation = 1.0 + (base_vals["saturation"] - 1.0) * reduction
+        B.object_scale = reduction
         B.hdr_amount = base_vals["hdr"] * reduction
         B.rend_gain = 1.0 + (base_vals["gain"] - 1.0) * reduction
         if base_vals["detail"] is not None:
@@ -774,6 +829,32 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
                        sky, wb, wb_status, deconv_status, hdr_status, scnr_status, reduction, is_noop, regions, backend_name, tone_stage, ai)
     learned = [k for k, v in ai.items() if v.get("status") == "applied"]
     ops = _operation_report(ctx_r)
+    if recipe.catalog_sha256:
+        ops.append({"name": "catalog_color", "requested": True, **catalog,
+                    "fallback": wb_status["status"] if catalog["status"] != "applied" else None})
+    if focus.enabled:
+        ops.append({"name": "focus_stretch", "requested": True, "status": "applied" if focus_active else "skipped",
+                    "reason": None if focus_active else "Focused stretch requires a linear image with Stretch enabled.",
+                    "parameters": focus.model_dump()})
+    if recipe.object_color.active:
+        ops.append({"name": "object_color", "requested": True,
+                    "status": ("reduced" if reduction < 1 else "applied") if B.object_color else "skipped",
+                    "reason": None if B.object_color else ("Monochrome image." if not rgb else "No reliable star mask for protecting stars."),
+                    "parameters": {**recipe.object_color.model_dump(), "strength_multiplier": reduction, "domain": "display RGB"}})
+    if recipe.hubble_strength > 0:
+        reason = None
+        if not hubble_ready:
+            reason = ("Broadband input such as IR-cut cannot use the H-alpha/OIII palette." if filter_kind == "broadband" else
+                      "Hubble-style needs a confirmed linear H-alpha/OIII color FITS.")
+        elif not B.hubble_strength:
+            reason = "No reliable star mask for protecting stars during the Hubble-style blend."
+        ops.append({"name": "hubble_style", "requested": True,
+                    "status": "skipped" if reason else ("reduced" if reduction < 1 else "applied"),
+                    "reason": reason, "parameters": {"strength": recipe.hubble_strength,
+                        "effective_strength": B.hubble_strength * reduction, "input_filter": filter_kind,
+                        "dualband_confirmed": ctx.dualband_confirmed, "sky_rgb": B.hubble_sky if B.hubble_strength else None,
+                        "signal_sigma": B.hubble_sigma if B.hubble_strength else None,
+                        "domain": "display RGB only", "palette": "Hubble-style gold/teal from H-alpha and OIII proxies; not SHO"}})
     summary = _summary_note(ops)
     report = {
         "engine_version": PIPELINE_VERSION,
@@ -807,6 +888,7 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
             "pedestal": A.pedestal if A.sky is not None else None,
             "gradient": grad_model.to_dict() if grad_model else None,
             "white_balance": wb.to_dict() if (mode == "linear" and rgb and auto.white_balance and not is_noop) else None,
+            "catalog_color": catalog if recipe.catalog_sha256 else None,
         } if mode == "linear" else None,
         "decisions": decisions,
         "clipping": {
@@ -830,8 +912,9 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
         } if noise_report else None,
         "learned_processing": learned,
         "scientific_disclosure": (
-            "This is display enhancement, not scientific calibration. Background neutralization and star-based white balance are not "
-            "photometric color calibration, and a sharper appearance is not additional measured resolution. "
+            ("Catalog RGB calibration uses relative reference-star colors, not absolute flux calibration. " if catalog["status"] == "applied" else
+             "This is display enhancement, not scientific calibration. Field-star white balance is not photometric calibration. ")
+            + "A sharper appearance is not additional measured resolution. "
             + (f"Learned (AI) processing was used ({', '.join(AI_LABELS[k] for k in learned)}): those values were predicted by trained "
                "neural networks from this image's own pixels (no prompts, no reference images); see each operation for the model file."
                if learned else "No pixels were generated.")
@@ -1115,6 +1198,8 @@ def _operation_report(c: _ReportCtx) -> list[dict[str, Any]]:
 
 def _summary_note(ops) -> str:
     phrases = {
+        ("hubble_style", "applied"): "Hubble-style (not SHO)",
+        ("hubble_style", "reduced"): "Hubble-style (not SHO) at reduced strength",
         ("gradient", "applied"): "Gradient removed",
         ("neutralize", "applied"): "Background neutralized",
         ("white_balance", "applied"): "Color balanced",

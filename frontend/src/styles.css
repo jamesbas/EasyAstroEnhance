@@ -465,3 +465,10 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.62); }
 .ai-state.ok { color: #8fd18f; }
 table.ai-models { width: 100%; border-collapse: collapse; }
 table.ai-models td { padding: 6px 4px; border-top: 1px solid var(--border); vertical-align: top; }
+.object-color-preview {
+  display: block;
+  width: 100%;
+  max-height: 220px;
+  object-fit: contain;
+  margin: 0.5rem 0;
+}
