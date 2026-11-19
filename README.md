@@ -3,6 +3,8 @@
 A small **local** application that enhances telescope photographs (JPEG, TIFF, stacked FITS) with conventional
 numerical image processing. Add files → pick a preset → **Enhance** → compare before/after → download.
 
+**[Visit the website](https://jamesbas.github.io/EasyAstroEnhance/)** for the Windows installer and a beginner's quick-start guide.
+
 * Everything runs on your PC (FastAPI on `127.0.0.1` + a React UI). No accounts, no cloud, no API keys.
 * **No generative processing**: no diffusion/inpainting, no super-resolution, no synthetic stars, no reference
   photographs of the target. Output pixels derive only from the uploaded pixels.
@@ -45,7 +47,8 @@ and app-local Visual C++ runtime DLLs. It writes the installer to `dist\windows\
 Before sharing, test on a clean Windows 11 machine and confirm you have the
 [rights to redistribute the Visual C++ DLLs](https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files).
 Consider code signing: unsigned downloads can trigger Windows SmartScreen warnings. Upload the `.exe`
-as a **GitHub release asset**, not a Git commit.
+as a **GitHub release asset**, not a Git commit. Update the download link and version in [the website](./docs/index.html)
+when a new installer is ready to share. GitHub Pages serves the `/docs` folder on `main`.
 
 ---------------------------------------------------------------------------------------------------
 
