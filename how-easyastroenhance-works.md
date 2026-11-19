@@ -1,129 +1,124 @@
 # How EasyAstroEnhance works
 
 Use this as a starting point when people ask "how did you process this?" It's written in plain language and avoids
-tables, so it pastes cleanly into a Facebook post. There's a short version and a longer one. Pick one, then fill in
-the details of your image at the bottom.
+tables, so it pastes cleanly into a Facebook post. Pick the short or longer version, keep only the steps you used, and
+fill in the details of your image at the bottom.
+
+Want to try it? The [EasyAstroEnhance website](https://jamesbas.github.io/EasyAstroEnhance/) has the Windows 11 x64
+installer and a quick-start guide. After installing, open **EasyAstroEnhance** from the Start menu.
+It opens in your browser, but the photos are processed on your PC. No account or GPU is needed for normal enhancement.
 
 ---
 
 ## Short version (copy and paste)
 
-I built my own application, EasyAstroEnhance, that makes it simple to enhance any image, or to stack a set of
-sub-frames first. Everything runs on my own PC, and my original files are never changed.
+I processed this with EasyAstroEnhance, a local app for bringing out faint detail in telescope photos. I can start
+with a JPEG, TIFF, or a stacked FITS from my telescope, or combine individual exposures or stacks from several
+nights first.
 
-For this image:
-
-1. **Stacking:** my Seestar sub-frames were checked one by one, and frames with clouds, trailing or blurry stars were
-   thrown out. The rest were aligned on the stars and averaged. Hot pixels and satellite trails were removed along the
-   way.
-2. **Background:** light pollution and gradients were removed, and the sky was made a neutral grey/black.
-3. **Colour:** colour was balanced using the stars themselves.
-4. **Noise:** noise was reduced while the data was still "linear" (before brightening), which is when it works best.
-5. **Stretch:** the image was brightened automatically, keeping bright cores from blowing out and stars from bloating.
-6. **Finishing:** a touch of contrast, detail and colour was added. A safety check stops the app if it starts
-   clipping blacks or whites.
-
-It's one button with presets (Natural, Vivid, Faint detail, Bright core, Star field, Seestar match), plus a few
-sliders if I want to tweak.
+I pick a preset and click **Enhance**. The app can even out the sky background, reduce noise, and brighten faint
+structure. I can fine-tune the contrast, colour, and detail, then compare before and after and save a new image.
+My originals are never changed or uploaded. Optional AI cleanup is off by default, and the app doesn't add stars
+or borrow detail from other photos.
 
 ---
 
 ## Longer version (copy and paste)
 
-I built my own application, EasyAstroEnhance, that makes it simple for me to enhance any image, or a set of images
-for stacking. It brings together the steps people usually do across several free programs (Siril, GraXpert,
-StarNet/Dark Star and so on) behind one "Enhance" button. Everything runs locally on my PC, and my original files are
-never modified. Here's what it does.
+I use EasyAstroEnhance to bring out detail in my telescope photos. I can enhance a JPEG or an existing TIFF or FITS
+stack without stacking again. If I have individual exposures or several nights of data for the same target, I can
+combine them first. Everything runs locally and leaves my original files alone.
 
-### Step 1: Stacking (when I start from sub-frames)
+### Step 1: Stack, if needed
 
-I point it at the folder of sub-frames my Seestar saved (for example the "M 31_sub" folder), and it:
+- **Individual exposures:** I open **Stack frames…** and point it at a folder, such as a Seestar `_sub` folder.
+  The app can use calibration frames (darks, flats, bias or dark-flats) if I have them. It checks star sharpness and
+  shape and sky brightness, explains why it skips poor or unaligned frames, and lines up the rest on the stars,
+  even when the field has rotated. It repairs persistent hot or cold pixels, and averaging with outlier rejection
+  can help remove passing satellite or aircraft trails. I can choose native size or optional 2× drizzle for suitable
+  data; drizzle uses the captured frames, not AI upscaling.
+- **Several nights:** I can combine already-stacked FITS images of the same target. The app aligns them even if the
+  image scales differ and gives stacks with more exposure time more weight.
 
-- **Reads every frame without touching the originals.**
-- **Calibrates** with dark and flat frames if I have them. Either way, it finds and fixes hot and cold pixels (the
-  sensor's stuck bright and dark dots).
-- **Grades each frame.** It counts the stars and measures how sharp and round they are and how bright the sky is.
-  Frames hit by clouds, wind, trailing or dawn are skipped, and it tells me why.
-- **Aligns the frames on the stars.** It matches triangles of stars between frames, which also handles the slow
-  rotation of the sky that alt-az scopes like the Seestar have.
-- **Turns the raw colour sensor data into colour** (debayering).
-- **Matches the sky level of every frame** and gives cleaner frames more weight.
-- **Averages everything with outlier rejection.** Anything that appears in only a few frames, like satellite and
-  airplane trails, is thrown out.
-- **Optionally uses "drizzle" at 2× size** for finer detail when there are lots of frames.
+Stacking adds a new, unbrightened (linear) FITS to the image queue. Enhancement is a separate step unless I tick
+**Enhance automatically when stacking finishes**.
 
-The result is one clean "linear" stacked image (unstretched; it still looks dark).
+### Step 2: Enhance for the kind of image I have
 
-### Step 2: Cleaning the data (while it's still linear)
+If the app asks **How was this image saved?** for a TIFF or FITS, I choose **Linear stack** (not yet brightened)
+or **Already processed**. If I choose **I'm not sure**, it shows a preview but waits for me to confirm before
+enhancing. JPEGs use the already-processed workflow.
 
-- **Removes light pollution and gradients**, the uneven glow from city lights or the moon.
-- **Neutralises the background colour** so the sky isn't green, red or brown.
-- **Balances colour using the field stars**, so a typical star comes out close to white.
-- **Reduces noise.** Grain and colour blotches are smoothed while fine detail and stars are protected.
+- **Linear stack:** The app can correct uneven sky glow when it can reliably tell sky from the target, neutralise
+  a colour cast in the background, and use suitable field stars as a guide for white balance. After reducing noise,
+  it brightens faint structure (a *stretch*) and treats stars and bright cores more gently. The **Original** view
+  of a linear stack gets its own basic display stretch so I can see what I'm comparing; the file itself is unchanged.
+- **Already processed:** A JPEG or a previously stretched TIFF or FITS gets gentler brightness and contrast
+  adjustments, background colour correction, and noise reduction rather than a full linear stretch.
 
-### Step 3: Bringing out the object (the "stretch")
+I can choose **Natural**, **Vivid**, **Faint detail**, **Bright core (HDR)**, **Star field**, or **Seestar match** and
+fine-tune with the sliders. If too many pixels become newly pure black or white, the app backs off the finishing
+adjustments and retries once. If clipping is still above its limit, it flags the result for review.
 
-- **Brightens the faint signal automatically** so the galaxy or nebula shows up. It sets the sky at a natural dark
-  level instead of crushing it to pure black.
-- **Protects bright cores** (like the centre of M31 or the core of M42) so they don't turn into a white blob.
-- **Stretches stars more gently** so they stay small and keep their colour.
+### Optional colour and stretch tools
 
-### Step 4: Finishing
+- **Enhance Hubble-style** gives suitable linear H-alpha/OIII colour FITS, such as a Seestar LP stack, a gold-and-teal
+  look. It changes the display, not the linear data. It's a dual-band palette, not a true SHO image: the app doesn't
+  infer a missing sulfur channel. Regular broadband images aren't eligible for this button.
+- **Object Color** lets me adjust selected colour ranges in the galaxy or nebula. **Manual focus** lets me choose
+  which brightness range gets the strongest stretch on a linear image.
+- For prepared FITS data, **Combine channels…** can mix separate filter stacks into a new linear image. Optional
+  catalog colour matching can refine relative RGB balance on a broadband image that already has a sky-coordinate
+  solution, using a reference-star file I supply. The app doesn't solve the image or download a star catalog.
 
-- **Adds a little contrast ("pop")** anchored on the sky, so the background doesn't brighten.
-- **Enhances detail** in dust lanes and spiral arms only where there's real signal, never in the noise.
-- **Boosts the colour** that's already there, without making the sky noisy.
-- **Removes any leftover green cast** if there is one.
-- **Runs a safety check.** If more than 0.1% of the image would be newly clipped to pure black or white, it
-  automatically backs off and redoes the finishing.
+This is display enhancement, not absolute scientific calibration. Sharper-looking detail doesn't mean the telescope
+recorded more resolution.
 
-### Optional AI tools (I can switch these on or off)
+### Optional AI cleanup
 
-For some images I switch on three optional AI tools. They are the same trained models many people use in free
-programs, running on my own graphics card:
+All three tools are **off by default**. If I turn one on, the model runs on my own PC after a one-time download
+(GPU when supported, CPU as a fallback). The usual non-AI method runs if the model is missing or can't run.
 
-- **AI background extraction** (GraXpert's model) removes light pollution even around big galaxies and nebulae.
-- **AI noise reduction** (GraXpert's denoise model) removes grain and colour mottle.
-- **AI star separation** (Dark Star from Seti Astro's Cosmic Clarity) temporarily lifts the stars off. The galaxy or
-  nebula is brightened and sharpened on its own, then the stars go back on, kept small. The stars are never removed
-  from the final image.
+- **AI background extraction** (GraXpert) estimates uneven sky glow in a linear stack.
+- **AI noise reduction** (GraXpert) reduces grain and colour blotches on linear or already-processed images.
+- **AI star separation** (Seti Astro's Cosmic Clarity Dark Star) separates stars temporarily so the galaxy or nebula
+  can be processed separately. The stars are added back into the final image. This is for linear stacks.
 
-These are image clean-up tools, not "generative AI". Nothing is drawn from a text prompt or copied from someone
-else's photo of the object. They work only on my own pixels. The app records which model was used for every image.
+None draws new stars, fills in missing sky, or works from someone else's image. Strong cleanup can soften faint
+features or dim a faint halo, so I check the before and after. The report names any model actually used.
 
-### What it never does
+### Step 3: Compare and share
 
-- It never adds stars, detail or structure from other images, and it never "paints in" anything.
-- It never removes stars from the final image.
-- It never changes my original files. Every enhancement starts again from the original.
-- It never sends my images anywhere. No cloud, no accounts.
+I can compare the original and the result side by side or switch between saved results. I can export a PNG, JPEG,
+16-bit TIFF, a before/after comparison JPEG, or a processed FITS for FITS input. The standard processed FITS export
+omits location and observer fields; there's a separate full-metadata option if I want those included.
 
-Every result comes with a report listing exactly which steps ran, which were skipped (and why), and the settings
-used. That makes it easy to answer "what did you do?" and to repeat the same processing later.
+The result comes with a summary and a downloadable report that records the app version, settings, steps that ran
+or were skipped, and why. That's the best place to check what actually happened before I describe the processing.
 
 ---
 
 ## Fill in the details for each post
 
-Copy this block under your post and fill it in. The numbers are shown in the app: the "Stacked N of M frames" note
-under the viewer, and the summary under the enhanced image.
+Copy this block under your post, fill it in, and delete anything that doesn't apply. Use the stack summary and the
+enhancement report rather than assuming every feature ran.
 
 - Target: M__
-- Telescope: ZWO Seestar S30 / S50 (filter: IR-cut / LP)
-- Sub-frames: ___ × ___ s (___ kept, ___ skipped for clouds/blur), total ___ minutes
-- Location / Bortle: ___
-- Stacked in: EasyAstroEnhance (native size / 2× drizzle; darks/flats: yes/no)
-- Enhanced in: EasyAstroEnhance, preset "___"
-- Tweaks: Background ___, Stretch ___, Contrast ___, Colour ___, Detail ___, Noise reduction ___
-- AI tools: background extraction on/off, noise reduction on/off, star separation on/off
-- Anything else: (e.g. cropped in ___)
+- Telescope and filter: ___ (e.g. Seestar S30, IR-cut or LP)
+- Input: telescope JPEG / linear TIFF or FITS stack / individual exposures / stacks from several nights
+- Stacked in: telescope / EasyAstroEnhance / other / not applicable
+- Exposure: ___ of ___ frames used (or ___ nights combined), ___ minutes of total exposure used
+- Stacking options, if used: calibration frames ___; native size or 2× drizzle ___
+- Enhanced in: EasyAstroEnhance v___, preset "___"; tweaks ___
+- Optional tools actually used: Hubble-style / manual stretch / channel mixing / AI model(s) ___
+- Other edits or notes: ___ (e.g. cropped in another app)
 
 ---
 
-## Credits (worth mentioning when the AI tools are on)
+## Credits (include the models you used)
 
-- GraXpert background and denoise models: GraXpert Development Team (graxpert.com), CC BY-NC-SA 4.0, non-commercial
-  use.
-- Dark Star star separation model: Seti Astro, Cosmic Clarity (MIT licence).
-- The stacking and processing steps follow the same well-known techniques used by free tools like Siril, GraXpert
-  and PixInsight-style workflows, re-implemented in one app.
+- GraXpert background and denoise models: [GraXpert Development Team and contributors](https://graxpert.com/),
+  CC BY-NC-SA 4.0 (non-commercial use).
+- Cosmic Clarity Dark Star star separation model: Seti Astro (Franklin Marek), MIT licence.
+
+For more on supported inputs and processing methods, see the [README](./README.md).
