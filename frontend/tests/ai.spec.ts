@@ -12,6 +12,7 @@ test.describe('AI tools', () => {
     await uploadAndWaitReady(page);
     const panel = page.getByTestId('ai-tools');
     await expect(panel).toBeVisible();
+    await expect(panel.getByText(/AI processing can take much longer without a compatible GPU/)).toBeVisible();
     for (const tool of ['background', 'denoise', 'stars']) {
       await expect(page.getByTestId(`switch-ai-${tool}`)).not.toBeChecked();  // AI is never on by default
     }

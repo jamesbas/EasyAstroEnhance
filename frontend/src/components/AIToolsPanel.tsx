@@ -65,6 +65,10 @@ export function AIToolsPanel({ ai, asset, models, onToggle }: AIToolsPanelProps)
   return (
     <section className="ai-tools" aria-labelledby="ai-tools-title" data-testid="ai-tools">
       <h3 id="ai-tools-title">AI tools <span className="muted small">optional</span></h3>
+      <p className="muted small">
+        AI processing can take much longer without a compatible GPU, especially noise reduction on large images.
+        Leave these tools off for faster, standard enhancement.
+      </p>
       {o && !o.runtime_available && <p className="warn-text small">The AI runtime is not installed, so these tools are unavailable.</p>}
       {TOOLS.map((t) => (
         <div key={t.tool} className={`option-row${ai[t.tool] ? ' on' : ''}`}>

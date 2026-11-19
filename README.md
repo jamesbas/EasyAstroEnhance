@@ -150,7 +150,7 @@ frontend/ (React + TypeScript + Vite)         backend/app/
   atomic rename. Identical settings reuse the cached run (cache key: source SHA-256, engine + dependency versions,
   canonical recipe, per-file regions/background model, backend, precision); **Reprocess** always makes a new run.
 
-### Processing method disclosure (engine 1.3.2, recipe schema 6 — one-button Enhance)
+### Processing method disclosure (engine 1.3.3, recipe schema 6 — one-button Enhance)
 
 Pick a **preset** (Natural, Vivid, Faint detail, Bright core (HDR), Star field, Seestar match), press **Enhance**.
 Six sliders (Background, Stretch, Contrast/Pop, Color, Detail, Noise reduction) and a *Protect bright cores* switch tune
@@ -238,15 +238,22 @@ Under **AI tools** in the Enhancement panel, three switches are all off by defau
   Settings → AI models. On Windows, downloads use native certificate validation so Windows can retrieve missing
   intermediate certificates when permitted. The files come from fixed URLs and are verified by SHA-256 before use.
   If GraXpert is already installed, its identical model files are copied instead of downloaded.
-* **Where they run:** on the GPU through DirectML (any DirectX 12 GPU), with the CPU as fallback. On an 8 MP Seestar
-  stack: background about 1.5 s, noise reduction about 17 s, star separation about 6–11 s.
+* **Where they run:** on a compatible GPU through DirectML on Windows, with the CPU as a fallback. AI processing can
+  take much longer on the CPU, especially noise reduction on large images. For faster processing on a PC or VM
+  without a compatible GPU, leave the AI switches off; standard enhancement is still available.
+  In one CPU-only Windows VM test, enhancement took nearly 7 minutes with all three AI tools enabled versus
+  24 seconds with AI off. Actual times depend on the hardware and the image.
+  For comparison, **on the test PC's GPU** an 8 MP Seestar stack took about 1.5 s for background extraction,
+  17 s for noise reduction, and 6–11 s for star separation. These are not CPU estimates.
 * **If a model is missing or fails:** the step is skipped with a reason and the classical step runs instead.
 * **Star separation:** the galaxy or nebula is stretched and finished on its own, then the stars are added back, kept
   small. A bright galaxy core is protected from being mistaken for a star. The processed FITS still contains the stars.
 * **Stretch safeguard:** AI denoised data are treated as at most 2× cleaner when the stretch is chosen. Without this,
   the solver over-stretched and amplified colour mottle.
-* **Disclosure:** every result's report lists each AI step with its model file, SHA-256, licence and GPU/CPU provider,
-  and FITS HISTORY names the models. GraXpert's models are licensed for non-commercial use only.
+* **Processing report:** after the enhancement finishes, choose **More formats → Processing report (JSON)** below
+  the image. For each AI step that ran, `execution_provider` shows the CPU or GPU used and `seconds` shows how long
+  it took. The report also identifies the model file, SHA-256, and licence, and FITS HISTORY names the models.
+  GraXpert's models are licensed for non-commercial use only.
 * **Limits:** these networks predict pixel values. Background extraction can darken the faintest outer halo of a
   frame-filling galaxy, and full-strength denoising can soften the faintest structure. Compare before and after.
 
