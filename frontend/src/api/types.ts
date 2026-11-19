@@ -59,8 +59,9 @@ export interface AIRecipe {
   background: boolean;
   denoise: boolean;
   stars: boolean;
+  star_brightness: number;
 }
-export type AITool = keyof AIRecipe;
+export type AITool = Exclude<keyof AIRecipe, 'star_brightness'>;
 
 export interface ObjectColorRecipe {
   reds: number;

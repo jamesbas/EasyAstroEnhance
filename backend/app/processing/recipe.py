@@ -9,6 +9,8 @@ other parameter is chosen from image statistics unless an exact value is given u
 
 Schema 4 (engine 1.2): adds the optional AI tools (``ai``), all off by default. Schema 3 recipes are migrated by adding
 ``ai`` switched off; every schema 3 field keeps its meaning.
+
+Schema 7 (engine 1.4): adds opt-in AI star dimming. Older recipes retain the full star blend.
 """
 from __future__ import annotations
 
@@ -16,9 +18,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-PIPELINE_VERSION = "1.3.3"
-RECIPE_SCHEMA_VERSION = 6
-MIGRATABLE_SCHEMAS = {3, 4, 5}
+PIPELINE_VERSION = "1.4.0"
+RECIPE_SCHEMA_VERSION = 7
+MIGRATABLE_SCHEMAS = {3, 4, 5, 6}
 
 Strength = Literal["gentle", "balanced", "strong"]
 
@@ -99,6 +101,7 @@ class AIRecipe(_Strict):
     background: bool = False  # GraXpert background extraction instead of the polynomial gradient model (linear only)
     denoise: bool = False  # GraXpert denoising instead of wavelet denoise; strength = the Noise reduction slider
     stars: bool = False  # Dark Star separation: finish the starless image, add the stars back (linear only)
+    star_brightness: float = Field(1.0, ge=0.25, le=1.0, description="Fraction of separated star brightness added back to the display")
 
 
 class ObjectColorRecipe(_Strict):

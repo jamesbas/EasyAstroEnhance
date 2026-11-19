@@ -153,7 +153,7 @@ frontend/ (React + TypeScript + Vite)         backend/app/
   atomic rename. Identical settings reuse the cached run (cache key: source SHA-256, engine + dependency versions,
   canonical recipe, per-file regions/background model, backend, precision); **Reprocess** always makes a new run.
 
-### Processing method disclosure (engine 1.3.3, recipe schema 6 — one-button Enhance)
+### Processing method disclosure (engine 1.4.0, recipe schema 7 — one-button Enhance)
 
 Pick a **preset** (Natural, Vivid, Faint detail, Bright core (HDR), Star field, Seestar match), press **Enhance**.
 Six sliders (Background, Stretch, Contrast/Pop, Color, Detail, Noise reduction) and a *Protect bright cores* switch tune
@@ -251,6 +251,11 @@ Under **AI tools** in the Enhancement panel, three switches are all off by defau
 * **If a model is missing or fails:** the step is skipped with a reason and the classical step runs instead.
 * **Star separation:** the galaxy or nebula is stretched and finished on its own, then the stars are added back, kept
   small. A bright galaxy core is protected from being mistaken for a star. The processed FITS still contains the stars.
+  On a confirmed linear stack, turn on **AI star separation** to show **Star brightness**. Leave it at **100%**
+  for the usual blend, or lower it to **25–99%** and run **Enhance** again to dim the separated star contribution.
+  It uses the same Dark Star model, affects only the enhanced display and its exports, and never offers a starless
+  result. It leaves the original and the processed-linear FITS unchanged. The processing report records the dimming
+  setting when applied, or the reason it was skipped. Existing presets keep the 100% blend unless you change it.
 * **Stretch safeguard:** AI denoised data are treated as at most 2× cleaner when the stretch is chosen. Without this,
   the solver over-stretched and amplified colour mottle.
 * **Processing report:** after the enhancement finishes, choose **More formats → Processing report (JSON)** below

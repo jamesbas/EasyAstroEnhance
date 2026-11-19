@@ -162,6 +162,11 @@ These constants apply to the rendered baseline only. They are not valid physical
   starless layer. `starless + stars` equals the input exactly. Display finishing (stretch, HDR, pop, detail, saturation)
   is applied to the starless image; the stars are added back with the display brightness the stretch gives them,
   blended toward the gentler star stretch. The processed-linear FITS is never starless.
+- **Star brightness (engine 1.4.0, recipe schema 7):** an opt-in multiplier (`ai.star_brightness`, 0.25–1.0) on
+  the separated star contribution at display recomposition, after the gentler stretch. It requires successful
+  AI star separation on a confirmed linear stack, leaves the processed-linear FITS unchanged, and never exports a
+  starless layer. Older presets migrate to 1.0, which preserves the previous blend. The run report records the
+  factor used or why it was skipped.
 - **Models:** downloaded on request into `<data>/ai-models` from fixed URLs (an identical file in a local GraXpert
   installation is copied instead), verified by size and SHA-256, removable in Settings. GraXpert models are
   CC BY-NC-SA 4.0 (non-commercial use); Dark Star is MIT. The cache key of a run includes which model files were used.

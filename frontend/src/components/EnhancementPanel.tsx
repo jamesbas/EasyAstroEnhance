@@ -111,7 +111,8 @@ export function EnhancementPanel(p: EnhancementPanelProps) {
 
         <LookControls look={recipe.look} stretchOn={recipe.tone.enabled && !(recipe.focus_stretch.enabled && asset?.baseline?.domain === 'linear')} mono={mono} edit={p.edit} />
 
-        <AIToolsPanel ai={recipe.ai} asset={asset} models={p.aiModels} onToggle={p.setAI} />
+        <AIToolsPanel ai={recipe.ai} asset={asset} models={p.aiModels} onToggle={p.setAI}
+          onStarBrightness={(factor) => p.edit((r) => { r.ai.star_brightness = factor; })} />
 
         <div className="options">
           <OptionRow id="background" label="Manual sky regions" checked={recipe.background.enabled} strength={recipe.background.strength}

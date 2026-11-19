@@ -164,6 +164,7 @@ class GroupB:
     hubble_sky: tuple[float, ...] = (0.0, 0.0, 0.0)
     hubble_sigma: float = 0.0
     separated: bool = False  # AI star separation: x is the starless image, "full" the image with stars
+    star_brightness: float = 1.0
 
     @property
     def tail_needed(self) -> bool:
@@ -338,6 +339,8 @@ def _group_b(be: Backend, tile_in: dict[str, np.ndarray], inner: tuple[int, int,
     else:
         y = rgb0
     if stars_disp is not None:  # stars added back over the finished starless image
+        if P.star_brightness < 1.0:
+            stars_disp *= P.star_brightness
         y = xp.clip(y + stars_disp, 0.0, 1.0)
 
     sl = (slice(iy0, iy1), slice(ix0, ix1))
@@ -666,7 +669,8 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
     # ---------------------------------------------------------------- analysis 2: display decisions (CPU)
     progress("Choosing the stretch")
     sp: StretchParams | None = None
-    B = GroupB(mode=mode, channels=channels, frame=frame, tone_enabled=recipe.tone.enabled, manual=manual)
+    B = GroupB(mode=mode, channels=channels, frame=frame, tone_enabled=recipe.tone.enabled, manual=manual,
+               star_brightness=recipe.ai.star_brightness)
     focus = recipe.focus_stretch
     focus_active = focus.enabled and mode == "linear" and recipe.tone.enabled
     y0: np.ndarray
@@ -1143,6 +1147,10 @@ def _operation_report(c: _ReportCtx) -> list[dict[str, Any]]:
     else:
         add("tone", False, "off")
     add_ai("ai_stars", r.ai.stars)
+    if r.ai.star_brightness < 1.0 and (st := c.ai.get("ai_stars")) is not None:
+        add("star_brightness", True, st["status"], st.get("reason"),
+            {"factor": B.star_brightness, "domain": "display-only"} if B.separated else None,
+            be_label if B.separated else None)
     if r.auto.star_stretch and B.separated and c.tone_stage and r.tone.enabled:
         add("star_stretch", True, "applied", None, {
             "method": "stars separated by the AI tool are added back over the finished starless image with the brightness the stretch gives them, "
@@ -1220,6 +1228,7 @@ def _summary_note(ops) -> str:
         ("ai_background", "applied"): "AI background removed",
         ("ai_denoise", "applied"): "AI noise reduction",
         ("ai_stars", "applied"): "Stars separated (AI) and added back",
+        ("star_brightness", "applied"): "Stars dimmed",
     }
     parts = []
     quiet_skips = {"hdr", "green_removal", "gradient"}  # automatic stages that are expected to skip on many images

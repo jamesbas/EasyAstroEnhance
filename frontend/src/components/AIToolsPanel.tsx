@@ -57,11 +57,14 @@ interface AIToolsPanelProps {
   asset: Asset | null;
   models: AIModels;
   onToggle: (tool: AITool, on: boolean) => void;
+  onStarBrightness: (factor: number) => void;
 }
 
-export function AIToolsPanel({ ai, asset, models, onToggle }: AIToolsPanelProps) {
+export function AIToolsPanel({ ai, asset, models, onToggle, onStarBrightness }: AIToolsPanelProps) {
   const o = models.overview;
-  const rendered = asset !== null && asset.interpretation.state !== 'linear' && asset.format !== 'fits';
+  const linear = asset?.interpretation.state === 'linear';
+  const rendered = asset?.format === 'jpeg' || asset?.interpretation.state === 'rendered';
+  const starBrightnessPercent = Math.round(ai.star_brightness * 100);
   return (
     <section className="ai-tools" aria-labelledby="ai-tools-title" data-testid="ai-tools">
       <h3 id="ai-tools-title">AI tools <span className="muted small">optional</span></h3>
@@ -77,9 +80,25 @@ export function AIToolsPanel({ ai, asset, models, onToggle }: AIToolsPanelProps)
           </div>
           <p className="option-hint" id={`hint-ai-${t.tool}`}>
             {t.hint}
-            {t.linearOnly && rendered && ai[t.tool] ? ' Not used on this image: it works on linear stacks (FITS) only.' : ''}
+            {t.linearOnly && rendered && ai[t.tool] ? ' Not used on this image: it works on linear stacks only.' : ''}
           </p>
           {ai[t.tool] && o && <ToolStatus tool={t.tool} overview={o} models={models} />}
+          {t.tool === 'stars' && ai.stars && linear && (
+            <div className="slider-row">
+              <div className="slider-head">
+                <label htmlFor="ai-star-brightness">Star brightness</label>
+                <output className="slider-value" htmlFor="ai-star-brightness">{starBrightnessPercent}%</output>
+              </div>
+              <div className="range-wrap">
+                <input id="ai-star-brightness" type="range" min={25} max={100} step={1} value={starBrightnessPercent}
+                  aria-describedby="hint-ai-star-brightness" aria-valuetext={`${starBrightnessPercent}%`}
+                  onChange={(e) => onStarBrightness(e.currentTarget.valueAsNumber / 100)} />
+              </div>
+              <p className="slider-hint" id="hint-ai-star-brightness">
+                100% keeps the usual blend. Lower it to add back fainter stars on the next enhancement; it doesn't change the linear data.
+              </p>
+            </div>
+          )}
         </div>
       ))}
       <p className="muted small" data-testid="ai-disclosure">

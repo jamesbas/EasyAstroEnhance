@@ -1,5 +1,9 @@
 import { expect, test } from '@playwright/test';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { collectConsoleErrors, resetBackend, uploadAndWaitReady } from './helpers';
+
+const monoFits = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'mono-linear.fits');
 
 test.describe('AI tools', () => {
   test.beforeEach(async ({ request }) => {
@@ -29,5 +33,24 @@ test.describe('AI tools', () => {
     await expect(section).toContainText('Dark Star');
     await expect(section.locator('tr')).toHaveCount(4);
     expect(errors).toEqual([]);
+  });
+
+  test('star brightness is opt-in on linear stacks and is sent with the enhancement', async ({ page }) => {
+    await page.goto('/');
+    await page.getByTestId('file-input').setInputFiles(monoFits);
+    await page.getByTestId('intake-option-linear').click({ timeout: 30_000 });
+    await expect(page.getByTestId('asset-status')).toHaveText('Ready', { timeout: 30_000 });
+    const slider = page.getByRole('slider', { name: 'Star brightness' });
+    const stars = page.getByTestId('switch-ai-stars');
+    await expect(slider).toBeHidden();
+    await stars.check({ force: true });
+    await expect(slider).toHaveValue('100');
+    await slider.fill('60');
+    await page.getByTestId('preset-select').selectOption('vivid');
+    await expect(slider).toHaveValue('60');
+    const job = page.waitForRequest((req) => req.method() === 'POST' && new URL(req.url()).pathname === '/api/v1/jobs');
+    await page.getByTestId('enhance-selected').click();
+    expect((await job).postDataJSON().recipe.ai).toMatchObject({ stars: true, star_brightness: 0.6 });
+    await expect(page.getByTestId('asset-status')).toHaveText(/^Complete/, { timeout: 60_000 });
   });
 });

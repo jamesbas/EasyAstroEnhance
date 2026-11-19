@@ -17,7 +17,7 @@ from app.processing.ai import runtime as rt
 from app.processing.ai.tiles import resize_linear, tile_apply
 from app.processing.ai.tools import ai_background, ai_denoise, separate_stars
 from app.processing.pipeline import AssetContext, ExecutionOptions, prepare_linear_frame, run_pipeline
-from app.processing.recipe import AIRecipe, RECIPE_SCHEMA_VERSION, builtin_presets, parse_recipe
+from app.processing.recipe import AIRecipe, RECIPE_SCHEMA_VERSION, RecipeCompatibilityError, builtin_presets, parse_recipe
 from conftest import linear_field, make_image, synthetic_field
 
 onnx = pytest.importorskip("onnx")
@@ -195,6 +195,30 @@ def test_pipeline_identity_star_separation_matches_plain_main_stretch(models):
     assert np.abs(a.display - b.display).max() < 2e-3  # nothing separated -> same finishing as without the tool
 
 
+def test_star_brightness_dims_only_the_added_back_stars(models, monkeypatch):
+    img = _linear_image()
+    stars_mask = np.zeros(img.pixels.shape[:2], dtype=bool)
+    y, x = np.unravel_index(img.pixels.mean(axis=-1).argmax(), stars_mask.shape)
+    stars_mask[y, x] = True
+
+    def split_at_bright_pixel(proc, *_args):
+        stars = np.zeros_like(proc)
+        stars[stars_mask] = proc[stars_mask] * 0.5
+        return proc - stars, stars, {}
+
+    monkeypatch.setattr("app.processing.pipeline.separate_stars", split_at_bright_pixel)
+    full = _run(img, AIRecipe(stars=True), models)
+    half = _run(img, AIRecipe(stars=True, star_brightness=0.5), models)
+    low = _run(img, AIRecipe(stars=True, star_brightness=0.25), models)
+
+    np.testing.assert_array_equal(half.display[~stars_mask], full.display[~stars_mask])
+    assert low.display[y, x].mean() < half.display[y, x].mean() < full.display[y, x].mean()
+    np.testing.assert_array_equal(low.display_fixed, full.display_fixed)
+    np.testing.assert_array_equal(low.processed, full.processed)
+    status = next(o for o in low.report["operations"] if o["name"] == "star_brightness")
+    assert status["status"] == "applied" and status["parameters"] == {"factor": 0.25, "domain": "display-only"}
+
+
 def test_ai_smoothing_does_not_drive_a_deeper_stretch(models, monkeypatch):
     """A model that flattens the sky completely must not make the stretch solver lift everything (engine 1.2 noise floor)."""
     import hashlib
@@ -219,12 +243,14 @@ def test_ai_smoothing_does_not_drive_a_deeper_stretch(models, monkeypatch):
 
 def test_missing_models_skip_with_reason_and_classical_steps_run(tmp_path):
     img = _linear_image()
-    res = _run(img, AIRecipe(background=True, denoise=True, stars=True), tmp_path / "none")
+    res = _run(img, AIRecipe(background=True, denoise=True, stars=True, star_brightness=0.5), tmp_path / "none")
+    standard = _run(img, AIRecipe(), tmp_path / "none")
     ops = {o["name"]: o for o in res.report["operations"]}
-    for name in ("ai_background", "ai_denoise", "ai_stars"):
+    for name in ("ai_background", "ai_denoise", "ai_stars", "star_brightness"):
         assert ops[name]["status"] == "skipped" and "not downloaded" in ops[name]["reason"]
     assert ops["denoise"]["status"] == "applied" and ops["gradient"]["status"] in ("applied", "skipped")
     assert res.report["learned_processing"] == [] and "No pixels were generated" in res.report["scientific_disclosure"]
+    np.testing.assert_array_equal(res.display, standard.display)
 
 
 def test_rendered_images_only_get_ai_denoise(models):
@@ -245,6 +271,13 @@ def test_schema3_recipes_and_presets_migrate_with_ai_off():
     assert r.schema_version == RECIPE_SCHEMA_VERSION and r.ai == AIRecipe() and r.look.color == builtin_presets()["vivid"].look.color
     for p in builtin_presets().values():
         assert p.ai == AIRecipe()  # AI tools are opt-in, never part of a built-in preset
+
+
+def test_legacy_star_separation_keeps_its_blend_and_zero_is_rejected():
+    recipe = parse_recipe({"schema_version": 6, "ai": {"stars": True}})
+    assert recipe.ai.stars and recipe.ai.star_brightness == 1.0
+    with pytest.raises(RecipeCompatibilityError, match="star_brightness"):
+        parse_recipe({"ai": {"stars": True, "star_brightness": 0.0}})
 
 
 # ------------------------------------------------------------------------------ real models on a real stack
