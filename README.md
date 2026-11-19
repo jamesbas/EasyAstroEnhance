@@ -15,9 +15,41 @@ numerical image processing. Add files → pick a preset → **Enhance** → comp
 Full specification: [astro-photo-enhancer-app-spec.md](astro-photo-enhancer-app-spec.md). Plain-language explanation for
 sharing (e.g. with your processed images): [how-easyastroenhance-works.md](how-easyastroenhance-works.md).
 
+## Install on Windows
+
+Download `EasyAstroEnhance-<version>-Windows-x64-Setup.exe` from the Assets section of a
+[GitHub Release](https://github.com/jamesbas/EasyAstroEnhance/releases) that includes the installer. Run it,
+then open **EasyAstroEnhance** from the Start menu. It opens in your default browser. To quit, close its
+console window or press **Ctrl+C** there; closing the browser tab alone does not stop the app.
+
+The installer is for **Windows 11 x64 (Intel/AMD)**. It works offline and does not require administrator
+access, Git, Python, Node.js, or an NVIDIA GPU. CUDA acceleration is not bundled. Optional AI model files
+are still separate, opt-in downloads.
+
+### Uninstall or update
+
+1. Quit EasyAstroEnhance by closing its console window. Closing the browser tab alone does not stop it.
+2. In Windows **Settings → Apps → Installed apps**, find **EasyAstroEnhance**, click **…**, and choose **Uninstall**.
+   Do this from the same Windows account that installed it.
+3. If you're updating, run the new installer under that same account.
+
+Uninstalling removes the program and shortcuts, but keeps app history, presets, exports, and any downloaded AI
+models in `%LOCALAPPDATA%\EasyAstroEnhance`. Leave this folder alone when updating. Your original photos outside
+that folder are not touched.
+
+**For maintainers:** On Windows x64, install the `uv` and Node.js prerequisites below and
+[Inno Setup 7](https://jrsoftware.org/inno-setup/downloads). Run `.\scripts\build-installer.ps1` from
+the repository root. It bundles Python 3.12, the locked production dependencies, the built frontend,
+and app-local Visual C++ runtime DLLs. It writes the installer to `dist\windows\` and prints its SHA-256.
+
+Before sharing, test on a clean Windows 11 machine and confirm you have the
+[rights to redistribute the Visual C++ DLLs](https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files).
+Consider code signing: unsigned downloads can trigger Windows SmartScreen warnings. Upload the `.exe`
+as a **GitHub release asset**, not a Git commit.
+
 ---------------------------------------------------------------------------------------------------
 
-## 1. Requirements
+## 1. Requirements for running from source
 
 | Need | Notes |
 |---|---|
@@ -118,7 +150,7 @@ frontend/ (React + TypeScript + Vite)         backend/app/
   atomic rename. Identical settings reuse the cached run (cache key: source SHA-256, engine + dependency versions,
   canonical recipe, per-file regions/background model, backend, precision); **Reprocess** always makes a new run.
 
-### Processing method disclosure (engine 1.3.1, recipe schema 6 — one-button Enhance)
+### Processing method disclosure (engine 1.3.2, recipe schema 6 — one-button Enhance)
 
 Pick a **preset** (Natural, Vivid, Faint detail, Bright core (HDR), Star field, Seestar match), press **Enhance**.
 Six sliders (Background, Stretch, Contrast/Pop, Color, Detail, Noise reduction) and a *Protect bright cores* switch tune
@@ -203,8 +235,9 @@ Under **AI tools** in the Enhancement panel, three switches are all off by defau
 | AI star separation | Cosmic Clarity Dark Star 2.1 / 2.1c, 15 MB each (MIT) | star-mask blending | linear stacks |
 
 * **Downloading models:** the first time you switch a tool on, click **Download** next to it, or manage all models in
-  Settings → AI models. The files come from fixed URLs and are verified by SHA-256 before use. If GraXpert is already
-  installed, its identical model files are copied instead of downloaded.
+  Settings → AI models. On Windows, downloads use native certificate validation so Windows can retrieve missing
+  intermediate certificates when permitted. The files come from fixed URLs and are verified by SHA-256 before use.
+  If GraXpert is already installed, its identical model files are copied instead of downloaded.
 * **Where they run:** on the GPU through DirectML (any DirectX 12 GPU), with the CPU as fallback. On an 8 MP Seestar
   stack: background about 1.5 s, noise reduction about 17 s, star separation about 6–11 s.
 * **If a model is missing or fails:** the step is skipped with a reason and the classical step runs instead.
@@ -280,6 +313,7 @@ tests, and bump `PIPELINE_VERSION` if outputs change.
 | GPU shows “Processing: CPU” | Settings → **Check GPU setup**. “CuPy is not installed” → `.\scripts\setup-gpu.ps1`. “Failed to find CUDA headers” → the `[ctk]` extra is missing (re-run setup-gpu). Update the NVIDIA driver if the runtime is newer than the driver. CPU always works. |
 | “needs about X GB of memory” | The up-front estimate exceeded the RAM budget (default 60% of available). Close programs, or raise the memory fraction in Settings; a 100 MP linear RGB image needs tens of GB. |
 | AI tool shows “Model not downloaded” | Click **Download** next to it (internet needed once), or Settings → AI models. The classical step is used until then. |
+| AI model download fails with a certificate error | Check the PC's date and time and install pending Windows updates. Open the model's source, [Hugging Face](https://huggingface.co/jromanghf/graxpert-models) or [GitHub](https://github.com/setiastro/cosmicclarity/releases), in a browser on the same PC. If it shows a certificate warning, don't bypass it. On a managed network, ask the administrator to check the trusted HTTPS proxy certificate. |
 | “This file needs debayering or stacking first” | Single raw/CFA frames cannot be enhanced on their own; use **Stack frames…** on their folder, or add the telescope’s stacked RGB/mono image. |
 | Stacking: “Enter the full folder path” | Paste an absolute path such as `D:\Seestar\MyWorks\M 42_sub` (quotes are fine). |
 | Stacking: many frames skipped | Open the stack report; choose *Lenient* or *Off* under Advanced → *Skip poor frames* to keep more frames. |

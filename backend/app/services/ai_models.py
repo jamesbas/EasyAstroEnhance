@@ -9,8 +9,11 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import ssl
+import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -18,8 +21,18 @@ from typing import Any
 from ..processing.ai import registry
 from ..processing.ai.runtime import PROVIDER_LABELS, available_providers
 
+if sys.platform == "win32":
+    import truststore
+
 CHUNK = 1024 * 1024
 TIMEOUT_S = 60
+
+
+def _download_context() -> ssl.SSLContext | None:
+    if sys.platform == "win32":
+        # Native chain validation can fetch missing intermediates on a fresh Windows install.
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    return None
 
 
 class ModelManager:
@@ -121,7 +134,10 @@ class ModelManager:
             h = hashlib.sha256()
             local = self._graxpert_copy(spec)
             src = open(local, "rb") if local else urllib.request.urlopen(  # noqa: SIM115 - closed below
-                urllib.request.Request(spec.url, headers={"User-Agent": "EasyAstroEnhance"}), timeout=TIMEOUT_S)
+                urllib.request.Request(spec.url, headers={"User-Agent": "EasyAstroEnhance"}),
+                timeout=TIMEOUT_S,
+                context=_download_context(),
+            )
             try:
                 with open(part, "wb") as out:
                     while chunk := src.read(CHUNK):
@@ -141,6 +157,14 @@ class ModelManager:
             job.update(state="installed", source="local GraXpert installation" if local else spec.url)
         except BaseException as exc:  # never leave a partial file behind
             part.unlink(missing_ok=True)
-            job.update(state="error", error=str(exc) or type(exc).__name__)
             if isinstance(exc, InterruptedError):
                 job.update(state="missing", error=None)
+            elif isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, ssl.SSLCertVerificationError):
+                job.update(
+                    state="error",
+                    error="Could not verify the model download site's HTTPS certificate. "
+                          "Check this computer's date, time and trusted certificates. "
+                          "On a managed network, ask your administrator to check the proxy certificate.",
+                )
+            else:
+                job.update(state="error", error=str(exc) or type(exc).__name__)

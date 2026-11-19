@@ -19,3 +19,4 @@ frontend/playwright-report/
 *.log
 docs/visual-review/
 !frontend/tests/fixtures/**
+/dist/windows/

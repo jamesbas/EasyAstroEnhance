@@ -15,6 +15,7 @@ dependencies = [
     "imagecodecs",
     "astropy",
     "psutil",
+    "truststore; sys_platform == 'win32'",
     # Optional AI tools (opt-in per run): ONNX inference of third-party models. DirectML runs on any DirectX 12 GPU.
     "onnxruntime-directml; sys_platform == 'win32'",
     "onnxruntime; sys_platform != 'win32'",

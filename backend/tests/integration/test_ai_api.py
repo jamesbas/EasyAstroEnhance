@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import ssl
+import urllib.error
+from unittest.mock import Mock
 
 import pytest
 
 from app.processing.ai import registry
+from app.services import ai_models
 from conftest import wait_for
 
 
@@ -52,6 +56,22 @@ def test_corrupted_download_is_discarded(client, fake_models, monkeypatch):
                  and next(x for x in client.get("/api/v1/ai/models").json()["models"] if x["id"] == "graxpert-background"), timeout=30)
     assert "SHA-256" in m["error"]
     assert not any(client.cfg.ai_models_dir.glob("graxpert-background*"))
+
+
+def test_model_download_explains_certificate_failure_without_installing(client, fake_models, monkeypatch):
+    spec = dataclasses.replace(registry.MODELS["graxpert-background"], url="https://models.example.invalid/model.onnx")
+    monkeypatch.setitem(registry.MODELS, spec.id, spec)
+    failed_open = Mock(side_effect=urllib.error.URLError(ssl.SSLCertVerificationError("unable to get local issuer certificate")))
+    monkeypatch.setattr(ai_models.urllib.request, "urlopen", failed_open)
+
+    assert client.post("/api/v1/ai/models/background/download").status_code == 202
+    status = client.app.state.ai_models.wait(spec.id, timeout=5)
+
+    assert status["state"] == "error"
+    assert "trusted certificates" in status["error"]
+    assert "proxy" in status["error"]
+    failed_open.assert_called_once()
+    assert not list(client.cfg.ai_models_dir.glob(f"{spec.file}*"))
 
 
 def test_recipe_with_ai_flags_is_accepted_and_old_presets_migrate(client):

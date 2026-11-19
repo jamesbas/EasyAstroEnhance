@@ -16,7 +16,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-PIPELINE_VERSION = "1.3.1"
+PIPELINE_VERSION = "1.3.2"
 RECIPE_SCHEMA_VERSION = 6
 MIGRATABLE_SCHEMAS = {3, 4, 5}
 
