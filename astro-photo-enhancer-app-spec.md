@@ -1,10 +1,15 @@
 # EasyAstroEnhance — Application Development Specification
 
-Version 1.5 • November 15, 2026 • Prepared for Jaime Basilico
+Version 1.6 • November 19, 2026 • Prepared for Jaime Basilico
+
+> **Amendment 1.6 (engine 1.5.0, recipe schema 8).** **Star brightness** can explicitly omit the AI-separated
+> stars in the enhanced display at 0%. **Edit export…** optionally reframes and labels a finished result as a
+> separate sharing PNG/JPEG. Default enhancement preserves the usual star blend and source geometry. Neither
+> feature changes the original or processed-linear data. See fidelity rules 3 and 8.
 
 > **Amendment 1.5 (optional AI tools; revises decision D1).** At the user's request, three opt-in learned tools are
 > added (engine 1.2.0, recipe schema 4): **AI background extraction** (GraXpert background model), **AI noise reduction**
-> (GraXpert denoising model) and **AI star separation** (Cosmic Clarity Dark Star; the stars are always added back). They
+> (GraXpert denoising model) and **AI star separation** (Cosmic Clarity Dark Star; the stars are added back by default). They
 > are image-to-image restoration networks run locally through ONNX Runtime (DirectML GPU on Windows, CPU fallback) — no
 > prompts, no reference images, no text-to-image generation, no cloud. All are off by default and in every built-in
 > preset; each replaces one classical step, is skipped with a reason (classical step used) when its model is missing or
@@ -47,12 +52,12 @@ These are release requirements, not optional marketing promises:
 
 1. Never call an image-generation service, diffusion model, generative fill, learned reconstruction, synthetic-star tool, super-resolution model or external image repository. *(Amended 1.5: the three opt-in AI tools of §4 "Version 1.3" — learned background extraction, denoising and star separation run locally on the image's own pixels — are the only permitted learned processing; they are off by default and disclosed per run. Text-to-image, diffusion, generative fill, super-resolution and reference images remain forbidden.)*
 2. Do not substitute reference photographs of the named object or use object identity to invent its appearance.
-3. Preserve field of view, dimensions, star coordinates, orientation and existing structures. Apply EXIF orientation once and document it. Do not crop, rotate, resize or remove stars automatically.
+3. Preserve field of view, dimensions, star coordinates, orientation and existing structures by default. Apply EXIF orientation once and document it. Do not crop, rotate, resize or remove stars automatically. A user may explicitly rotate, zoom/crop, pan and add text to a separate edited display export, leaving the original and regular exports untouched.
 4. Preserve originals byte-for-byte. Processing changes pixels; avoid claiming that every output pixel is an original measured value or that filtering guarantees preservation of all faint signal.
 5. Keep edits reproducible with source SHA-256, pipeline version, algorithm settings, resolved per-file parameters and dependency versions.
 6. Distinguish display enhancement from scientific calibration. Background neutralization and star-based white balance are not photometric color calibration; a sharper appearance is not additional measured resolution. Optional offline catalog color uses user-provided numerical RGB reference-star ratios on solved broadband FITS. This is relative color calibration, not reference-image processing or absolute flux calibration.
 7. Preserve burned-in telescope labels using explicit protected regions. Never reconstruct sky behind lettering.
-8. Star removal and star-size reduction stay disabled. *(Amended 1.5: AI star separation splits stars from the background only so each is processed appropriately; the stars are always added back and no output is starless.)* *(Amended 1.3:)* Deconvolution is available only as an opt-in Advanced option on linear stacks (star-measured PSF, damped, SNR-gated, star cores excluded); the multiscale Detail stage is noise- and edge-gated and bounded. Both are disclosed per run.
+8. No automatic star removal or morphological star-size reduction is performed. *(Amended 1.6: an explicit 0% Star brightness setting leaves out the AI-separated star layer in the enhanced display; any star signal the model missed may remain. The processed-linear data still contain the stars.)* *(Amended 1.3:)* Deconvolution is available only as an opt-in Advanced option on linear stacks (star-measured PSF, damped, SNR-gated, star cores excluded); the multiscale Detail stage is noise- and edge-gated and bounded. Both are disclosed per run.
 9. Report applied, reduced and skipped operations per image. Never silently claim success for an unsupported operation.
 
 ## 3. Current skill audit and migration boundary
@@ -162,11 +167,16 @@ These constants apply to the rendered baseline only. They are not valid physical
   starless layer. `starless + stars` equals the input exactly. Display finishing (stretch, HDR, pop, detail, saturation)
   is applied to the starless image; the stars are added back with the display brightness the stretch gives them,
   blended toward the gentler star stretch. The processed-linear FITS is never starless.
-- **Star brightness (engine 1.4.0, recipe schema 7):** an opt-in multiplier (`ai.star_brightness`, 0.25–1.0) on
+- **Star brightness (engine 1.5.0, recipe schema 8):** an opt-in multiplier (`ai.star_brightness`, 0.0–1.0) on
   the separated star contribution at display recomposition, after the gentler stretch. It requires successful
-  AI star separation on a confirmed linear stack, leaves the processed-linear FITS unchanged, and never exports a
-  starless layer. Older presets migrate to 1.0, which preserves the previous blend. The run report records the
-  factor used or why it was skipped.
+  AI star separation on a confirmed linear stack and leaves the processed-linear data unchanged. The default 1.0
+  keeps the previous blend; 0.0 omits the separated layer. Existing saved settings are preserved. The run report
+  records the factor used or why it was skipped.
+- **Edit export… (engine 1.5.0):** a separate editor for a completed enhanced display. Preview and exports share
+  the same rotation, zoom crop, pan and optional bottom-left caption. The target label is user-confirmed text,
+  optionally filled from the selected FITS image's `OBJECT` field (with primary-header fallback). Render from the
+  stored full-resolution 16-bit display, not the preview. Save a separate 16-bit PNG or sharing JPEG with edit
+  settings and source run ID in file metadata, without copying original FITS headers or changing any existing file.
 - **Models:** downloaded on request into `<data>/ai-models` from fixed URLs (an identical file in a local GraXpert
   installation is copied instead), verified by size and SHA-256, removable in Settings. GraXpert models are
   CC BY-NC-SA 4.0 (non-commercial use); Dark Star is MIT. The cache key of a run includes which model files were used.

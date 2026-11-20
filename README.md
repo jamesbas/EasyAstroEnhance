@@ -7,7 +7,7 @@ numerical image processing. Add files → pick a preset → **Enhance** → comp
 
 * Everything runs on your PC (FastAPI on `127.0.0.1` + a React UI). No accounts, no cloud, no API keys.
 * **No generative processing**: no diffusion/inpainting, no super-resolution, no synthetic stars, no reference
-  photographs of the target. Output pixels derive only from the uploaded pixels.
+  photographs of the target. Enhancement uses only the uploaded pixels; optional sharing labels are added separately.
 * **Optional AI tools (off by default):** AI background extraction, AI noise reduction and AI star separation run
   trained image-restoration networks (GraXpert, Cosmic Clarity Dark Star) locally on your GPU. They are opt-in per run,
   and every result names the model it used. See "AI tools" below.
@@ -153,7 +153,7 @@ frontend/ (React + TypeScript + Vite)         backend/app/
   atomic rename. Identical settings reuse the cached run (cache key: source SHA-256, engine + dependency versions,
   canonical recipe, per-file regions/background model, backend, precision); **Reprocess** always makes a new run.
 
-### Processing method disclosure (engine 1.4.0, recipe schema 7 — one-button Enhance)
+### Processing method disclosure (engine 1.5.0, recipe schema 8 — one-button Enhance)
 
 Pick a **preset** (Natural, Vivid, Faint detail, Bright core (HDR), Star field, Seestar match), press **Enhance**.
 Six sliders (Background, Stretch, Contrast/Pop, Color, Detail, Noise reduction) and a *Protect bright cores* switch tune
@@ -188,7 +188,7 @@ classical algorithms — see [improve-enhance.md](improve-enhance.md). No 8-bit 
 * **Guardrail:** new black/white clipping (per-pixel transitions vs the original display; pixels already clipped in any
   channel of the original are not new) above 0.1 % halves the finishing strengths once and reruns; if still above, the
   result is flagged “review”.
-* **Not implemented by design:** generative processing, AI sharpening/deconvolution, starless output, blind plate
+* **Not implemented by design:** generative processing, AI sharpening/deconvolution, blind plate
   solving, and cubes.
 
 ### Optional color and stretch tools
@@ -249,13 +249,12 @@ Under **AI tools** in the Enhancement panel, three switches are all off by defau
   For comparison, **on the test PC's GPU** an 8 MP Seestar stack took about 1.5 s for background extraction,
   17 s for noise reduction, and 6–11 s for star separation. These are not CPU estimates.
 * **If a model is missing or fails:** the step is skipped with a reason and the classical step runs instead.
-* **Star separation:** the galaxy or nebula is stretched and finished on its own, then the stars are added back, kept
-  small. A bright galaxy core is protected from being mistaken for a star. The processed FITS still contains the stars.
-  On a confirmed linear stack, turn on **AI star separation** to show **Star brightness**. Leave it at **100%**
-  for the usual blend, or lower it to **25–99%** and run **Enhance** again to dim the separated star contribution.
-  It uses the same Dark Star model, affects only the enhanced display and its exports, and never offers a starless
-  result. It leaves the original and the processed-linear FITS unchanged. The processing report records the dimming
-  setting when applied, or the reason it was skipped. Existing presets keep the 100% blend unless you change it.
+* **Star separation:** on a confirmed linear stack, enable **AI star separation** to show **Star brightness**.
+  At **100%** (the default) the app keeps its usual star blend. Set **1–99%** to dim the separated stars, or set
+  **0%** to leave that layer out altogether, then run **Enhance** again. Stars the model doesn't separate may remain,
+  especially large or saturated stars. This uses the same Dark Star model and changes only the enhanced display and
+  its exports, not the original or the processed-linear FITS. The report records the applied setting or why it was
+  skipped. Existing presets keep their saved setting; older presets without this control keep the usual blend.
 * **Stretch safeguard:** AI denoised data are treated as at most 2× cleaner when the stretch is chosen. Without this,
   the solver over-stretched and amplified colour mottle.
 * **Processing report:** after the enhancement finishes, choose **More formats → Processing report (JSON)** below
@@ -308,6 +307,18 @@ labelled preview only; processing stays blocked. Exports: full-resolution PNG (8
 otherwise), 16-bit TIFF, JPEG q95, comparison JPEG, processed float FITS (labelled *processed-linear* or
 *display-processed*; location/observer keywords removed unless you pick the explicit full-metadata FITS), report,
 summary, and Download all (ZIP with a folder per run and a batch summary).
+
+### Edited exports for sharing
+
+Select a finished result and choose **Edit export…** under the image. Rotate in 90° steps or use the angle slider to
+fine-tune. Zoom to crop and drag the preview (or use its arrow keys) to choose the framing. Fine rotations may leave
+black corners; zoom in to crop them. Zoom does not enlarge the exported pixels.
+
+Enter optional **Label text** for a name, company or caption. **Include target name** fills in the FITS `OBJECT`
+name when available, or lets you enter one manually. The text is imprinted in the lower-left corner of the new
+image. Choose **PNG (16-bit)** or **JPEG (for sharing)**. This creates a separate copy of the enhanced display, not a
+new enhancement run. The file records the source result and edit settings, but doesn't copy the original header.
+Your regular downloads, original file, and processed-linear FITS or TIFF stay unchanged.
 
 ## 6. Dependency locks
 

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api, fullMetadataFitsUrl, readableError } from '../api/client';
 import type { BatchIncludeKind, Run } from '../api/types';
 import { formatBytes } from '../lib/format';
+import { EditExportDialog } from './EditExportDialog';
 
 interface ExportMenuProps {
   run: Run | null;
@@ -30,6 +31,7 @@ function triggerDownload(url: string): void {
 
 export function ExportMenu({ run, batchRunIds, onError }: ExportMenuProps) {
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [include, setInclude] = useState<BatchIncludeKind[]>([]);
   const [zip, setZip] = useState<ZipState>({ phase: 'idle' });
   const rootRef = useRef<HTMLDivElement>(null);
@@ -87,6 +89,8 @@ export function ExportMenu({ run, batchRunIds, onError }: ExportMenuProps) {
       ) : (
         <button type="button" className="btn primary" disabled data-testid="download-png">Download PNG</button>
       )}
+      <button type="button" className="btn" disabled={!run} onClick={() => setEditing(true)}>Edit export…</button>
+      {editing && run && <EditExportDialog key={run.id} runId={run.id} onClose={() => setEditing(false)} />}
       <div className="menu-wrap">
         <button type="button" className="btn" disabled={!run} aria-haspopup="true" aria-expanded={open} onClick={() => setOpen((o) => !o)} data-testid="more-formats">
           More formats ▾

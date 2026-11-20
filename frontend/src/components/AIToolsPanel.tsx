@@ -13,7 +13,7 @@ const TOOLS: { tool: AITool; label: string; hint: string; linearOnly: boolean }[
   },
   {
     tool: 'stars', label: 'AI star separation', linearOnly: true,
-    hint: 'Dark Star lifts the stars off so the galaxy or nebula is stretched and sharpened on its own; the stars are then added back, kept small.',
+    hint: 'Dark Star separates the stars so the galaxy or nebula can be enhanced on its own.',
   },
 ];
 
@@ -90,12 +90,12 @@ export function AIToolsPanel({ ai, asset, models, onToggle, onStarBrightness }: 
                 <output className="slider-value" htmlFor="ai-star-brightness">{starBrightnessPercent}%</output>
               </div>
               <div className="range-wrap">
-                <input id="ai-star-brightness" type="range" min={25} max={100} step={1} value={starBrightnessPercent}
+                <input id="ai-star-brightness" type="range" min={0} max={100} step={1} value={starBrightnessPercent}
                   aria-describedby="hint-ai-star-brightness" aria-valuetext={`${starBrightnessPercent}%`}
                   onChange={(e) => onStarBrightness(e.currentTarget.valueAsNumber / 100)} />
               </div>
               <p className="slider-hint" id="hint-ai-star-brightness">
-                100% keeps the usual blend. Lower it to add back fainter stars on the next enhancement; it doesn't change the linear data.
+                100% keeps the usual blend. 0% leaves out the separated stars; some stars may remain. Applies on your next enhancement, not to the linear data.
               </p>
             </div>
           )}

@@ -45,12 +45,12 @@ test.describe('AI tools', () => {
     await expect(slider).toBeHidden();
     await stars.check({ force: true });
     await expect(slider).toHaveValue('100');
-    await slider.fill('60');
+    await slider.fill('0');
     await page.getByTestId('preset-select').selectOption('vivid');
-    await expect(slider).toHaveValue('60');
+    await expect(slider).toHaveValue('0');
     const job = page.waitForRequest((req) => req.method() === 'POST' && new URL(req.url()).pathname === '/api/v1/jobs');
     await page.getByTestId('enhance-selected').click();
-    expect((await job).postDataJSON().recipe.ai).toMatchObject({ stars: true, star_brightness: 0.6 });
+    expect((await job).postDataJSON().recipe.ai).toMatchObject({ stars: true, star_brightness: 0 });
     await expect(page.getByTestId('asset-status')).toHaveText(/^Complete/, { timeout: 60_000 });
   });
 });

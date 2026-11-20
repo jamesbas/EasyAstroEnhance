@@ -27,17 +27,17 @@ def quantize(display: np.ndarray, bits: int) -> np.ndarray:
     return np.rint(np.clip(display.astype(np.float64), 0.0, 1.0) * maxv).astype(dtype)
 
 
-def _png_insert_srgb(png: bytes) -> bytes:
-    """Insert an sRGB chunk (perceptual intent) after IHDR so viewers treat the file as sRGB."""
-    ihdr_end = 8 + 8 + 13 + 4
-    data = b"\x00"
-    chunk = struct.pack(">I", len(data)) + b"sRGB" + data
-    chunk += struct.pack(">I", zlib.crc32(b"sRGB" + data) & 0xFFFFFFFF)
-    return png[:ihdr_end] + chunk + png[ihdr_end:]
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
 
 
-def encode_png(arr: np.ndarray) -> bytes:
-    return _png_insert_srgb(bytes(imagecodecs.png_encode(np.ascontiguousarray(arr), level=6)))
+def encode_png(arr: np.ndarray, edit_metadata: bytes | None = None) -> bytes:
+    png = bytes(imagecodecs.png_encode(np.ascontiguousarray(arr), level=6))
+    # Insert sRGB (perceptual intent) and optional ASCII JSON for the sharing copy after IHDR.
+    chunks = _png_chunk(b"sRGB", b"\x00")
+    if edit_metadata is not None:
+        chunks += _png_chunk(b"tEXt", b"EasyAstroEnhance\x00" + edit_metadata)
+    return png[:33] + chunks + png[33:]
 
 
 def write_png(path: Path, display: np.ndarray, bits: int) -> None:

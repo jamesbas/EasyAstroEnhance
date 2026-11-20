@@ -284,16 +284,17 @@ def _group_b(be: Backend, tile_in: dict[str, np.ndarray], inner: tuple[int, int,
         fixed = fixed_map(xp, full, P.frame)[0]
         if P.tone_enabled:
             y = apply_stretch(xp, x, P.sp)
-            if P.separated:  # the display brightness the stars add, blended toward the gentler star stretch
+            if P.separated and P.star_brightness > 0:  # display brightness the stars add, blended toward the gentler stretch
                 d = apply_stretch(xp, full, P.sp) - y
                 if P.sp_star is not None and P.star_amount > 0:
                     d = (1.0 - P.star_amount) * d + P.star_amount * (apply_stretch(xp, full, P.sp_star) - apply_stretch(xp, x, P.sp_star))
                 stars_disp = xp.clip(d, 0.0, 1.0)
-            elif P.sp_star is not None and P.star_amount > 0:
+            elif not P.separated and P.sp_star is not None and P.star_amount > 0:
                 y = fin.star_blend(xp, y, apply_stretch(xp, x, P.sp_star), star, P.star_amount)
         elif P.separated:
             y = fixed_map(xp, x, P.frame)[0]
-            stars_disp = xp.clip(fixed - y, 0.0, 1.0)
+            if P.star_brightness > 0:
+                stars_disp = xp.clip(fixed - y, 0.0, 1.0)
         else:
             y = fixed
         rgb0 = y
@@ -1151,7 +1152,9 @@ def _operation_report(c: _ReportCtx) -> list[dict[str, Any]]:
         add("star_brightness", True, st["status"], st.get("reason"),
             {"factor": B.star_brightness, "domain": "display-only"} if B.separated else None,
             be_label if B.separated else None)
-    if r.auto.star_stretch and B.separated and c.tone_stage and r.tone.enabled:
+    if r.auto.star_stretch and B.separated and B.star_brightness == 0:
+        add("star_stretch", True, "inactive", "The separated stars are not added back at 0% brightness.")
+    elif r.auto.star_stretch and B.separated and c.tone_stage and r.tone.enabled:
         add("star_stretch", True, "applied", None, {
             "method": "stars separated by the AI tool are added back over the finished starless image with the brightness the stretch gives them, "
                       "blended toward the gentler stretch (D/8, same sky level)",
@@ -1227,13 +1230,15 @@ def _summary_note(ops) -> str:
         ("background", "applied"): "Background balanced",
         ("ai_background", "applied"): "AI background removed",
         ("ai_denoise", "applied"): "AI noise reduction",
-        ("ai_stars", "applied"): "Stars separated (AI) and added back",
+        ("ai_stars", "applied"): "Stars separated (AI)",
         ("star_brightness", "applied"): "Stars dimmed",
     }
     parts = []
     quiet_skips = {"hdr", "green_removal", "gradient"}  # automatic stages that are expected to skip on many images
     for op in ops:
-        if op["name"] == "no_operations":
+        if op["name"] == "star_brightness" and op["status"] == "applied" and op["parameters"]["factor"] == 0:
+            parts.append("Separated stars omitted")
+        elif op["name"] == "no_operations":
             parts.append("No operations selected")
         elif op["status"] == "skipped" and op["name"] not in quiet_skips:
             parts.append(f"{AI_LABELS.get(op['name']) or op['name'].replace('_', ' ').capitalize()} skipped")

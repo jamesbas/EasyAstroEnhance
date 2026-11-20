@@ -96,6 +96,17 @@ class BatchExportIn(BaseModel):
     include: list[Literal["tiff", "jpeg", "comparison", "fits", "linear-tiff"]] = Field(default_factory=list)
 
 
+class EditExportIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    rotation: int = Field(default=0, ge=-180, le=180)
+    zoom: float = Field(default=1, ge=1, le=4)
+    pan_x: float = Field(default=0, ge=-1, le=1)
+    pan_y: float = Field(default=0, ge=-1, le=1)
+    target: str = Field(default="", max_length=80)
+    label: str = Field(default="", max_length=120)
+    format: Literal["png", "jpeg"] = "png"
+
+
 class ConfirmIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     confirm: bool = False

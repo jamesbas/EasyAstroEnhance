@@ -69,6 +69,16 @@ export interface ObjectColorRecipe {
   blues: number;
 }
 
+export interface EditExportBody {
+  rotation: number;
+  zoom: number;
+  pan_x: number;
+  pan_y: number;
+  target: string;
+  label: string;
+  format: 'png' | 'jpeg';
+}
+
 export interface FocusStretchRecipe {
   enabled: boolean;
   strength: number;

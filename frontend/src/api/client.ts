@@ -3,6 +3,7 @@ import type {
   BatchIncludeKind, ComputeInfo, ComputePatchBody, ExportStatus, HistorySummary, Interpretation, Job, JobCreateBody,
   JobCreated, JobList, Preset, PresetList, Recipe, Rect, RunDetail, RunList, Session, StarMaskResult, UploadResult,
   ApiErrorBody, Stack, StackCreateBody, StackFolders, StackList, StackPlan, AIOverview,
+  EditExportBody,
 } from './types';
 
 export const API = '/api/v1';
@@ -187,6 +188,9 @@ export const api = {
   // runs
   listRuns: (assetId: string) => request<RunList>('GET', `/runs?asset_id=${encodeURIComponent(assetId)}`),
   getRun: (id: string) => request<RunDetail>('GET', `/runs/${id}`),
+  editExportTarget: (id: string) => request<{ target: string | null }>('GET', `/runs/${id}/edit-export/target`),
+  editExport: async (id: string, body: EditExportBody, preview: boolean, signal?: AbortSignal) =>
+    (await postFileOrPreview(`/runs/${id}/edit-export?preview=${preview}`, JSON.stringify(body), signal)).blob(),
   // presets
   listPresets: () => request<PresetList>('GET', '/presets'),
   createPreset: (name: string, recipe: Recipe) => request<Preset>('POST', '/presets', { name, recipe }),

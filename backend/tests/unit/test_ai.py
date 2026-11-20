@@ -209,14 +209,17 @@ def test_star_brightness_dims_only_the_added_back_stars(models, monkeypatch):
     monkeypatch.setattr("app.processing.pipeline.separate_stars", split_at_bright_pixel)
     full = _run(img, AIRecipe(stars=True), models)
     half = _run(img, AIRecipe(stars=True, star_brightness=0.5), models)
-    low = _run(img, AIRecipe(stars=True, star_brightness=0.25), models)
+    zero = _run(img, AIRecipe(stars=True, star_brightness=0.0), models)
 
     np.testing.assert_array_equal(half.display[~stars_mask], full.display[~stars_mask])
-    assert low.display[y, x].mean() < half.display[y, x].mean() < full.display[y, x].mean()
-    np.testing.assert_array_equal(low.display_fixed, full.display_fixed)
-    np.testing.assert_array_equal(low.processed, full.processed)
-    status = next(o for o in low.report["operations"] if o["name"] == "star_brightness")
-    assert status["status"] == "applied" and status["parameters"] == {"factor": 0.25, "domain": "display-only"}
+    np.testing.assert_array_equal(zero.display[~stars_mask], full.display[~stars_mask])
+    assert zero.display[y, x].mean() < half.display[y, x].mean() < full.display[y, x].mean()
+    np.testing.assert_allclose(half.display[y, x], (zero.display[y, x] + full.display[y, x]) / 2, atol=1e-6)
+    np.testing.assert_array_equal(zero.display_fixed, full.display_fixed)
+    np.testing.assert_array_equal(zero.processed, full.processed)
+    status = next(o for o in zero.report["operations"] if o["name"] == "star_brightness")
+    assert status["status"] == "applied" and status["parameters"] == {"factor": 0.0, "domain": "display-only"}
+    assert "Separated stars omitted" in zero.summary
 
 
 def test_ai_smoothing_does_not_drive_a_deeper_stretch(models, monkeypatch):
@@ -243,7 +246,7 @@ def test_ai_smoothing_does_not_drive_a_deeper_stretch(models, monkeypatch):
 
 def test_missing_models_skip_with_reason_and_classical_steps_run(tmp_path):
     img = _linear_image()
-    res = _run(img, AIRecipe(background=True, denoise=True, stars=True, star_brightness=0.5), tmp_path / "none")
+    res = _run(img, AIRecipe(background=True, denoise=True, stars=True, star_brightness=0.0), tmp_path / "none")
     standard = _run(img, AIRecipe(), tmp_path / "none")
     ops = {o["name"]: o for o in res.report["operations"]}
     for name in ("ai_background", "ai_denoise", "ai_stars", "star_brightness"):
@@ -273,11 +276,14 @@ def test_schema3_recipes_and_presets_migrate_with_ai_off():
         assert p.ai == AIRecipe()  # AI tools are opt-in, never part of a built-in preset
 
 
-def test_legacy_star_separation_keeps_its_blend_and_zero_is_rejected():
+def test_legacy_star_separation_keeps_its_blend_and_new_recipes_allow_zero():
     recipe = parse_recipe({"schema_version": 6, "ai": {"stars": True}})
     assert recipe.ai.stars and recipe.ai.star_brightness == 1.0
+    old_dimmed = parse_recipe({"schema_version": 7, "ai": {"stars": True, "star_brightness": 0.25}})
+    assert old_dimmed.ai.star_brightness == 0.25
+    assert parse_recipe({"ai": {"stars": True, "star_brightness": 0.0}}).ai.star_brightness == 0.0
     with pytest.raises(RecipeCompatibilityError, match="star_brightness"):
-        parse_recipe({"ai": {"stars": True, "star_brightness": 0.0}})
+        parse_recipe({"ai": {"stars": True, "star_brightness": -0.01}})
 
 
 # ------------------------------------------------------------------------------ real models on a real stack

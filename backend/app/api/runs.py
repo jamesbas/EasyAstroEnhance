@@ -10,9 +10,11 @@ from fastapi import APIRouter, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, Response
 
-from ..models.api import BatchExportIn, ConfirmIn
+from ..models.api import BatchExportIn, ConfirmIn, EditExportIn
+from ..processing.edit_export import Framing, render_edited
 from ..processing.export import _clean_header
 from ..processing.imagedata import ProcessingError
+from ..processing.recipe import PIPELINE_VERSION
 from ..services import previews
 from ..services.exports import ALLOWED_KINDS, start_batch
 from .common import ApiError, cfg_of, coord_of, db_of, serialize_run
@@ -116,6 +118,72 @@ async def download_export(request: Request, run_id: str, kind: str):
         raise ApiError(404, "EXPORT_MISSING", "The file is no longer on disk.")
     name = f"{(run['summary'] or {}).get('run_name', run_id)}-{entry['filename']}"
     return FileResponse(path, media_type=MEDIA.get(path.suffix.lower(), "application/octet-stream"), filename=name)
+
+
+def _label_text(text: str) -> str:
+    return "".join(c if c.isprintable() else " " for c in text).strip()
+
+
+def _fits_target(path: Path, report_path: Path, default_hdu: int) -> str | None:
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    interpretation = report.get("per_file_resolution", {}).get("interpretation", {})
+    hdu_index = interpretation.get("hdu")
+    if hdu_index is None:
+        hdu_index = default_hdu
+    with fits.open(path, lazy_load_hdus=True) as hdus:
+        for i in dict.fromkeys((hdu_index, 0)):
+            value = hdus[i].header.get("OBJECT")
+            if isinstance(value, str):
+                name = _label_text(value)[:80]
+                if name.casefold() not in ("", "unknown", "undefined", "none", "n/a"):
+                    return name
+    return None
+
+
+@router.get("/runs/{run_id}/edit-export/target")
+async def edit_export_target(request: Request, run_id: str):
+    run = _run(request, run_id)
+    asset = db_of(request).one("SELECT * FROM assets WHERE id=?", (run["asset_id"],))
+    if not asset:
+        raise ApiError(404, "ASSET_NOT_FOUND", "This result's original is no longer available.")
+    if asset["format"] != "fits":
+        return {"target": None}
+    cfg = cfg_of(request)
+    path = cfg.assets_dir / asset["id"] / asset["original_name"]
+    report_path = cfg.runs_dir / run_id / "processing.json"
+    default_hdu = next((c["index"] for c in asset["inspection"]["candidates"] if c["supported"]), 0)
+    try:
+        target = await run_in_threadpool(_fits_target, path, report_path, default_hdu)
+    except (OSError, ValueError, IndexError) as exc:
+        raise ApiError(422, "TARGET_UNAVAILABLE", "Couldn't read the FITS target. You can enter the name manually.") from exc
+    return {"target": target}
+
+
+@router.post("/runs/{run_id}/edit-export")
+async def edit_export(request: Request, run_id: str, body: EditExportIn, preview: bool = False):
+    _run(request, run_id)
+    path = cfg_of(request).runs_dir / run_id / "display.npy"
+    frame = Framing(body.rotation, body.zoom, body.pan_x, body.pan_y)
+    target, label = _label_text(body.target), _label_text(body.label)
+    lines = [text for text in (target, label) if text]
+    jpeg = body.format == "jpeg"
+    metadata = None if preview else json.dumps(
+        {**body.model_dump(), "target": target, "label": label, "run_id": run_id, "export_engine": PIPELINE_VERSION},
+        ensure_ascii=True,
+    ).encode("ascii")
+
+    def render() -> bytes:
+        return render_edited(previews.open_display(path), frame, lines, jpeg=jpeg, metadata=metadata, preview=preview)
+
+    try:
+        data = await run_in_threadpool(render)
+    except ProcessingError as exc:
+        raise ApiError(404 if exc.code == "NOT_FOUND" else 422, exc.code, exc.message) from exc
+    ext = "jpg" if jpeg else "png"
+    headers = {"Cache-Control": "no-store"}
+    if not preview:
+        headers["Content-Disposition"] = f'attachment; filename="{run_id}-edited.{ext}"'
+    return Response(data, media_type="image/jpeg" if preview or jpeg else "image/png", headers=headers)
 
 
 # ------------------------------------------------------------------------------------------ batch ZIP

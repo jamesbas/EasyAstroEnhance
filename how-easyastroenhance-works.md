@@ -81,8 +81,9 @@ All three tools are **off by default**. If I turn one on, the model runs on my o
 
 - **AI background extraction** (GraXpert) estimates uneven sky glow in a linear stack.
 - **AI noise reduction** (GraXpert) reduces grain and colour blotches on linear or already-processed images.
-- **AI star separation** (Seti Astro's Cosmic Clarity Dark Star) separates stars temporarily so the galaxy or nebula
-  can be processed separately. The stars are added back into the final image. This is for linear stacks.
+- **AI star separation** (Seti Astro's Cosmic Clarity Dark Star) separates stars in a linear stack so the galaxy or nebula
+  can be processed separately. The stars are normally added back. If I set **Star brightness** to **0%**, the stars
+  the model separated are left out of the enhanced view. Any it missed may still show; the linear data keep their stars.
 
 None draws new stars, fills in missing sky, or works from someone else's image. Strong cleanup can soften faint
 features or dim a faint halo, so I check the before and after. The report names any model actually used.
@@ -92,6 +93,9 @@ features or dim a faint halo, so I check the before and after. The report names 
 I can compare the original and the result side by side or switch between saved results. I can export a PNG, JPEG,
 16-bit TIFF, a before/after comparison JPEG, or a processed FITS for FITS input. The standard processed FITS export
 omits location and observer fields; there's a separate full-metadata option if I want those included.
+
+For a sharing copy, **Edit export…** lets me rotate, zoom and frame the enhanced image, and put my name or
+the target name on a separate PNG or JPEG.
 
 The result comes with a summary and a downloadable report that records the app version, settings, steps that ran
 or were skipped, and why. That's the best place to check what actually happened before I describe the processing.
