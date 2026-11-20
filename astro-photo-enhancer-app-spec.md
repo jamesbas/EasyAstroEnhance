@@ -1,6 +1,29 @@
 # EasyAstroEnhance — Application Development Specification
 
-Version 1.6 • November 19, 2026 • Prepared for Jaime Basilico
+Version 1.8 • November 20, 2026 • Prepared for Jaime Basilico
+
+> **Amendment 1.8 (engine 1.6.0, recipe schema 9; implemented).** One-button polish and four output fixes.
+> **Auto** becomes the default preset: it measures each image (bright core, faint extended signal, star density) and
+> applies one built-in preset's look; the object's name is never used. Three automatic stages are added, each with an
+> Advanced switch, a recorded reason when skipped and full disclosure: **cosmetic correction** of isolated coloured hot
+> and cold pixels on linear stacks (broadband one-pixel spikes, which may be stars, are never touched), **star-fringe
+> reduction** (only when bright stars have a measured blue/violet ring stronger than their surroundings) and
+> **dual-band defaults** (star white balance and green removal are skipped for recognized H-alpha/OIII stacks, whose
+> stars and teal OIII are not colour casts). A **Star color** Look slider boosts the existing colour of stars. Changed
+> settings show as a **live preview** (not saved) built from a cached linear stage; presets can be compared as
+> reduced-size quick looks; the panel opens in a **Simple** view; past settings can be restored; stacking folders can be
+> browsed; and Edit export offers **Crop stacking edges**. Fidelity rules 3 and 8 are clarified. See §4 "Amendment 1.8".
+
+> **Amendment 1.7 (approved scope, not yet implemented; each part ships with its own engine/recipe-schema bump).**
+> Four opt-in capabilities are added. Defaults and every built-in preset stay unchanged; each part is off until the
+> user enables it, is skipped with a recorded reason when it cannot run, and is disclosed per run.
+> **(A) Sky solution and built-in catalog colour:** verify a FITS header sky solution (WCS) against catalog stars, or
+> solve offline from the header's pointing/scale hints when no valid WCS exists (no blind solving, no network); a pinned,
+> downloadable star-colour catalog makes catalog colour a single **Accurate star colours** switch.
+> **(B) Object annotations** on the separate Edit export copy only.
+> **(C) AI sharpening** with the pinned Cosmic Clarity Sharpen models (MIT) as a fourth learned tool.
+> **(D) Star size** (an explicit, bounded, display-only reduction of the AI-separated star layer) and **Starless / Stars
+> layer exports** on request. Fidelity rules 1, 2, 3, 6 and 8 and §4 "Deferred" are amended. See §4 "Amendment 1.7".
 
 > **Amendment 1.6 (engine 1.5.0, recipe schema 8).** **Star brightness** can explicitly omit the AI-separated
 > stars in the enhanced display at 0%. **Edit export…** optionally reframes and labels a finished result as a
@@ -43,21 +66,23 @@ This is a specification for implementation in Visual Studio Code with GitHub Cop
 - Single user, local disk, sequential batch processing. Prefer optional NVIDIA GPU acceleration for eligible workloads, with a complete CPU fallback. Primary GPU target: the user’s NVIDIA GeForce RTX 5070 Ti with 16 GB VRAM; verify installed device capabilities at runtime.
 - Each uploaded image is processed independently. Selecting ten exposures does not stack them. *(Amended 1.4: stacking is a separate "Stack frames…" action on a folder.)*
 - The Seestar already performs stacking and produces FITS. Treat the telescope-produced integrated/stacked RGB or monochrome image as the primary FITS input; ~~do not add a stacking workflow~~ *(amended 1.4: an optional stacking workflow exists, see §4)*. The preferred FITS input is an integrated/stacked RGB or monochrome image. Individual raw exposures, CFA mosaics and ambiguous multidimensional data receive explanatory intake guidance.
-- Start with a conservative Natural preset. Advanced controls remain collapsed.
+- Start with a conservative Natural preset. Advanced controls remain collapsed. *(Amended 1.8: the default preset is
+  **Auto**, which picks one of the conservative built-in looks per image from measurements; the panel starts in the
+  **Simple** view.)*
 - Work from immutable originals; every adjustment starts from the source, not an earlier export.
 
 ## 2. Fidelity requirements
 
 These are release requirements, not optional marketing promises:
 
-1. Never call an image-generation service, diffusion model, generative fill, learned reconstruction, synthetic-star tool, super-resolution model or external image repository. *(Amended 1.5: the three opt-in AI tools of §4 "Version 1.3" — learned background extraction, denoising and star separation run locally on the image's own pixels — are the only permitted learned processing; they are off by default and disclosed per run. Text-to-image, diffusion, generative fill, super-resolution and reference images remain forbidden.)*
-2. Do not substitute reference photographs of the named object or use object identity to invent its appearance.
-3. Preserve field of view, dimensions, star coordinates, orientation and existing structures by default. Apply EXIF orientation once and document it. Do not crop, rotate, resize or remove stars automatically. A user may explicitly rotate, zoom/crop, pan and add text to a separate edited display export, leaving the original and regular exports untouched.
+1. Never call an image-generation service, diffusion model, generative fill, learned reconstruction, synthetic-star tool, super-resolution model or external image repository. *(Amended 1.5: the three opt-in AI tools of §4 "Version 1.3" — learned background extraction, denoising and star separation run locally on the image's own pixels — are the only permitted learned processing; they are off by default and disclosed per run. Text-to-image, diffusion, generative fill, super-resolution and reference images remain forbidden.)* *(Amended 1.7: opt-in **AI sharpening** with the pinned Cosmic Clarity Sharpen models of §4 "Amendment 1.7 (C)" is a fourth permitted learned tool under the same rules. It never changes image dimensions; super-resolution/upscaling models, including those published alongside it, remain forbidden.)*
+2. Do not substitute reference photographs of the named object or use object identity to invent its appearance. *(Amended 1.7: numeric reference **catalogs** — star positions, magnitudes and colour indices, and deep-sky object positions, sizes and names — are permitted, opt-in local data. They may be used only to verify or derive a sky solution, to fit relative colour gains, and to place user-requested text annotations on a separate sharing copy. They never select a rendering style or change pixel values by object identity. A target name typed by the user may seed a solve with approximate coordinates; the solution must still be confirmed by matched stars.)*
+3. Preserve field of view, dimensions, star coordinates, orientation and existing structures by default. Apply EXIF orientation once and document it. Do not crop, rotate, resize or remove stars automatically. A user may explicitly rotate, zoom/crop, pan and add text to a separate edited display export, leaving the original and regular exports untouched. *(Amended 1.7: on that separate edited export the user may also add object annotations, compass and scale bar overlays drawn from a verified or solved sky solution.)* *(Amended 1.8: Edit export may *suggest* a crop that excludes low-coverage stacking edges; it is applied only when the user clicks **Crop stacking edges**. Automatic cosmetic correction replaces only isolated one-pixel defects that cannot be real structure — a value in one colour channel far above its eight neighbours while the other channels are not, or a value far below all its neighbours — on faint background; one-pixel spikes present in every channel are kept because they may be undersampled stars.)*
 4. Preserve originals byte-for-byte. Processing changes pixels; avoid claiming that every output pixel is an original measured value or that filtering guarantees preservation of all faint signal.
 5. Keep edits reproducible with source SHA-256, pipeline version, algorithm settings, resolved per-file parameters and dependency versions.
-6. Distinguish display enhancement from scientific calibration. Background neutralization and star-based white balance are not photometric color calibration; a sharper appearance is not additional measured resolution. Optional offline catalog color uses user-provided numerical RGB reference-star ratios on solved broadband FITS. This is relative color calibration, not reference-image processing or absolute flux calibration.
+6. Distinguish display enhancement from scientific calibration. Background neutralization and star-based white balance are not photometric color calibration; a sharper appearance is not additional measured resolution. Optional offline catalog color uses user-provided numerical RGB reference-star ratios on solved broadband FITS. This is relative color calibration, not reference-image processing or absolute flux calibration. *(Amended 1.7: the reference ratios may also come from the app's pinned built-in star-colour catalog, and the sky solution may come from a verified FITS header WCS or the app's offline hinted solve. The result is still relative color calibration through a documented, generic RGB passband approximation, not absolute flux calibration or camera-specific spectrophotometry.)*
 7. Preserve burned-in telescope labels using explicit protected regions. Never reconstruct sky behind lettering.
-8. No automatic star removal or morphological star-size reduction is performed. *(Amended 1.6: an explicit 0% Star brightness setting leaves out the AI-separated star layer in the enhanced display; any star signal the model missed may remain. The processed-linear data still contain the stars.)* *(Amended 1.3:)* Deconvolution is available only as an opt-in Advanced option on linear stacks (star-measured PSF, damped, SNR-gated, star cores excluded); the multiscale Detail stage is noise- and edge-gated and bounded. Both are disclosed per run.
+8. No automatic star removal or morphological star-size reduction is performed. *(Amended 1.6: an explicit 0% Star brightness setting leaves out the AI-separated star layer in the enhanced display; any star signal the model missed may remain. The processed-linear data still contain the stars.)* *(Amended 1.7: an explicit **Star size** setting below 100% applies a bounded, centroid-preserving morphological reduction to the AI-separated star layer in the enhanced display only. On explicit request, **Starless** and **Stars** layer exports of a run that separated stars are allowed as separately labelled files. Neither is ever automatic or part of a built-in preset; the processed-linear FITS and regular exports keep all stars unless the user chose Star size or Star brightness.)* *(Amended 1.8: automatic **star-fringe reduction** only lowers the saturation of blue/violet/magenta hues in a narrow ring around bright stars, keeping luminance, and only when that ring's colour measurably exceeds a wider reference ring; **Star color** only raises the saturation of colour already present inside the star mask. Neither changes star size, position or brightness.)* *(Amended 1.3:)* Deconvolution is available only as an opt-in Advanced option on linear stacks (star-measured PSF, damped, SNR-gated, star cores excluded); the multiscale Detail stage is noise- and edge-gated and bounded. Both are disclosed per run.
 9. Report applied, reduced and skipped operations per image. Never silently claim success for an unsupported operation.
 
 ## 3. Current skill audit and migration boundary
@@ -196,11 +221,193 @@ These constants apply to the rendered baseline only. They are not valid physical
 - Channel mixes create a separate linear FITS with explicit input roles, gain, WCS alignment and source hashes. Preserve the reference grid and invalid overlap; do not generate missing signal. Unsolved inputs must be explicitly prealigned. No star replacement or starless output is introduced.
 - Engine 1.3.1 / recipe schema 6: a separate single-click Hubble-style action for recognized or explicitly confirmed H-alpha/OIII linear color FITS. Default Enhance and existing presets remain unchanged. The optional strength blends gold/teal according to sky-subtracted red and green/blue signal, with star, sky and highlight protection and no inferred sulfur channel. The processed-linear export is unchanged; the display recipe, mask inputs and any skipped operation are recorded. Known broadband data cannot be confirmed as dual-band.
 
+### Amendment 1.7 — sky solution, catalog colour, annotations, AI sharpening, star size and layer exports
+
+Approved scope; not implemented in engine 1.5.0. Each part below is independent, may ship separately, increments
+`PIPELINE_VERSION` when it can change outputs, and adds its recipe fields in a new recipe schema (schema 8 recipes and
+saved presets migrate with every new field off or neutral). Built-in presets never enable any of them. Each part is
+disclosed in the processing report (requested, applied/skipped/inactive with a reason, parameters, timings) and, where
+applicable, in FITS `HISTORY`.
+
+**(A) Sky solution and built-in catalog colour ("Accurate star colours")**
+
+- **Sky solution per asset.** The solution is per-image data, like protected regions: stored with the asset and in each
+  run report, never in a preset, never written into the original. Sources, in order:
+  1. *Header WCS, verified.* A celestial WCS in the selected FITS HDU (ZWO Seestar stacks carry `RA---TAN-SIP`) is used
+     only after verification: detected stars are matched to catalog stars projected through it. Initial engineering
+     thresholds, to be tuned on real data and recorded: at least 12 unambiguous matches, RMS residual ≤ 1.5 px, and at
+     least 50 % of the brightest 50 detected unsaturated stars matched. A header WCS that fails is reported and not used.
+  2. *Offline hinted solve.* When no verified WCS exists, solve from hints: `RA`/`DEC` (or `OBJCTRA`/`OBJCTDEC`) and the
+     pixel scale from `FOCALLEN` and `XPIXSZ` × `XBINNING`. EasyAstroEnhance stacks and channel mixes keep these hints.
+     For files without hints (for example JPEGs) the user may type approximate centre coordinates and field width, or a
+     target name resolved to coordinates through the bundled object catalog (fidelity rule 2).
+     Detected stars are matched to catalog stars around the hint (search radius 1.5 × the field diagonal, scale ±15 %,
+     any rotation, both parities) with the triangle-invariant + RANSAC matcher already used for stacking registration,
+     then refined to a TAN projection (plus SIP order 2 when at least 60 matches support it and the residual improves).
+     The same verification thresholds apply. No blind (hint-free) solving, no network service and no external solver
+     executable are required.
+  The solve runs in the worker as a cancellable analysis task, automatically once the catalog is installed and the
+  asset is ready, or on request. The asset shows **Sky solution:** *from file (verified)*, *solved*, or *not available*
+  with the reason. Processed-linear FITS exports may carry a solved WCS, marked `EAEWCS = 'solved'` with a `HISTORY` line;
+  a verified header WCS is passed through unchanged.
+- **Built-in reference data.** Two optional, pinned downloads managed like the AI models (fixed URL, size and SHA-256,
+  stored under `<data>/reference-data`, removable in Settings), each with its licence, credit line and version recorded
+  and shown:
+  * *Star catalog:* positions, magnitude and colour index derived from Gaia DR3 by a documented, reproducible build
+    script kept in the repository. Limit the magnitude so a typical Seestar field yields at least 50 usable stars at mid
+    galactic latitudes while the download stays bounded (target ≤ 200 MB). Index it spatially so extracting one field
+    is fast. Positions are used at the catalog epoch; the documented proper-motion error is negligible at Seestar pixel
+    scales. Confirm the Gaia redistribution terms and credit (ESA/Gaia/DPAC, DR3 citation) before the first release.
+  * *Deep-sky object catalog:* Messier/NGC/IC names, positions, sizes and position angles from an open catalog (for
+    example OpenNGC), with its licence recorded. Used for annotations (B) and name-to-coordinate solve hints only.
+- **Accurate star colours.** One switch (recipe `catalog_builtin`, default off), shown with the colour tools. For a
+  linear, broadband RGB FITS with a verified or solved sky solution, the field's catalog stars are converted to
+  reference `r/g` and `b/g` ratios through a documented, versioned transformation of the catalog colour index to a
+  generic broadband RGB response, and then fed to the existing catalog-colour fit (robust WCS matching, gain bounds,
+  disagreement checks). Require at least 20 matches for the built-in catalog. Dual-band, narrowband and channel-mix
+  palettes stay ineligible, as for user catalogs. On any failure the bounded field-star white balance runs instead, with
+  the reason. A user-imported CSV and the built-in catalog are mutually exclusive in one recipe. This is relative colour
+  calibration through a generic passband approximation (fidelity rule 6), not camera-specific spectrophotometry.
+
+**(B) Object annotations (Edit export… only)**
+
+- Options in **Edit export…**, all off by default: **Label objects** (deep-sky objects whose catalog position falls inside
+  the framed area, with a list to untick individual labels and an optional size/magnitude limit), **Compass (N/E)**
+  and **Scale bar**. Available only with a verified or solved sky solution; otherwise disabled with the reason.
+- Positions come from the sky solution transformed by the edit's rotation, crop and pan. Marks are thin ellipses
+  (catalog size and position angle) or ticks plus text, drawn on the separate sharing copy after framing, like the
+  existing caption. Regular exports, runs and originals are unchanged.
+- File metadata records the annotation settings, the object catalog's SHA-256 and the labels drawn. Object identity
+  places text only; it never changes pixel values (fidelity rule 2).
+
+**(C) AI sharpening (fourth learned tool)**
+
+- **Models:** Cosmic Clarity Sharpen (Seti Astro, Franklin Marek; MIT) from the project's GitHub releases:
+  `deep_sharp_stellar_cnn_AI3_5s.onnx` (stars) and `deep_nonstellar_sharp_cnn_radius_{1,2,4,8}AI3_5s.onnx` (non-stellar
+  detail). Record a fixed URL, size and SHA-256 for each file in the model registry; download only on request, as in
+  amendment 1.5. The same release's super-resolution models are never listed, downloaded or used (fidelity rule 1).
+- **Recipe:** `ai.sharpen` (default off), `ai.sharpen_amount` (0–1, default 0.5, non-stellar strength, the visible
+  slider when on) and `ai.sharpen_stars` (0–1, default 0.5, Advanced; 0 skips the stellar model). The non-stellar
+  radius model is chosen from the measured median star PSF radius and recorded.
+- **Processing:** feed the models as their reference implementation does (tile size, overlap, normalization). Linear
+  data use a temporary midtone stretch that is inverted exactly afterwards, as for star separation. Linear stacks:
+  after noise reduction (classical or AI), inside the processed-linear stage, so the processed-linear FITS contains the
+  sharpened values and names the models in `HISTORY`. Rendered images: after noise reduction. Blend the result by
+  strength and by the deconvolution SNR gate (no sharpening of sky noise); saturated star cores pass through unchanged.
+  When both AI sharpening and classical deconvolution are requested, AI sharpening runs and deconvolution is reported
+  inactive. A missing or failing model skips the step with a reason; classical deconvolution then runs only if the user
+  enabled it.
+- **Disclosure:** as for the other AI tools (model id, file, version, SHA-256, licence, attribution, execution provider,
+  timing, fallbacks, `learned_processing`). Report the sky noise before and after sharpening. "A sharper appearance is
+  not additional measured resolution" stays in the scientific disclosure.
+
+**(D) Star size and Starless / Stars layer exports**
+
+- **Star size:** `ai.star_size` from 0.5 to 1.0 (shown as 50–100 %, default 100 % = unchanged), next to Star brightness.
+  It requires successful AI star separation on a confirmed linear stack; otherwise it is reported as skipped with the
+  reason. At display recomposition, after the gentler star stretch and before Star brightness, the display-domain star
+  contribution is replaced by a strength-weighted blend of itself and a grey-scale morphological erosion. The
+  structuring-element radius is chosen from the measured median star FWHM. Requirements: the star layer stays
+  non-negative (no dark rings), star centroids move by at most 0.1 px on synthetic Gaussian stars, measured FWHM
+  decreases monotonically with the setting and never increases, no new sources appear, and the starless layer and the
+  processed-linear data are unchanged. The report records the setting, the structuring element and the median display
+  star FWHM before and after.
+- **Layer exports:** for a run in which AI star separation was applied, **More formats** offers, on request only and
+  not in the default **Download all** set:
+  * **Starless (display)** — the finished starless display before stars are added back, 16-bit PNG/TIFF;
+  * **Stars only (display)** — the display star contribution as composited (after star stretch, Star size and Star
+    brightness) on black, 16-bit PNG/TIFF;
+  * **Starless linear FITS** and **Stars linear FITS** — the processed-linear split, `EAEKIND = 'starless-linear'` /
+    `'stars-linear'`, `HISTORY` naming the separation model. Starless + stars equals the processed-linear array
+    within float32 rounding.
+  Each label states that the layers were made with learned star separation and that large or saturated stars may
+  remain partly in the starless layer. The regular processed-linear FITS is never starless. Layers are stored with the
+  run or re-rendered deterministically from it; their hashes are added to the report when first written.
+
+### Amendment 1.8 — one-button polish and output fixes (engine 1.6.0, recipe schema 9)
+
+Implemented. Schema 3–8 recipes and saved presets migrate with `auto_preset` off, `star_color` 0 and the two new
+automatic stages on (they are measurement-gated and skip when not needed). `PIPELINE_VERSION` is 1.6.0.
+
+**Auto preset (default).** The built-in **Auto** preset (`auto_preset: true`) is the default. Before processing, each
+image is measured on a ~1 MP block-averaged copy shown with its frozen baseline display stretch: the share of the frame
+with a smoothed star-free luminance above 0.75 (bright extended core), the share with extended signal more than 0.03
+above the sky and that signal's median level, and the number of detected stars per megapixel. The rules, in order:
+core share ≥ 0.2 % → **Bright core (HDR)**; extended share ≥ 7 % with median < 0.12 above the sky → **Faint detail**;
+extended share < 0.5 % with ≥ 100 stars/MP → **Star field**; otherwise **Natural**. The chosen preset's Look and preset
+Advanced values (core compression, star softening) then run exactly as if picked by hand; every other user setting
+(automatic stages, tone, AI tools, colour tools) is kept. The report records the choice, the reasons in plain words and
+the measurements; the run summary starts with "Auto: *preset* ·". The thresholds were calibrated on 22 real Seestar
+targets (M31 and M42 → Bright core; NGC 7000, IC 1805, M33, M45, M101 and other nebulae and large galaxies → Faint
+detail; C 22 IRCUT → Star field; M13, M51, NGC 281, Veil and a one-frame C 22 dual-band stack → Natural). Object names are never used (fidelity rule 2). With Auto
+on, the Look sliders show the look Auto chose for the current image; moving a Look slider or an Advanced value turns
+Auto off (Custom). Changing other settings keeps Auto.
+
+**Automatic stages added** (Advanced → automatic stage switches; each skipped with a reason when it does not apply):
+
+- **Repair hot and cold pixels** (`auto.cosmetic`, linear stacks). On the normalized linear data, before background
+  and gradient work: a value is repaired with the median of its eight same-channel neighbours only if it exceeds that
+  median by ≥ 8 σ of the channel's neighbour residual (or falls ≥ 8 σ below it), the most extreme neighbour carries less
+  than 25 % of that excess (isolated), the neighbourhood lies within sky + 10 σ (faint background), nothing is
+  saturated, invalid or protected, and — for hot pixels — the other two channels rise by less than 25 % of it in their
+  own noise units (a coloured spike). Monochrome images get cold-pixel repair only. Reported: counts of coloured hot
+  and cold pixels and values repaired.
+- **Reduce star colour fringes** (`auto.halo_reduction`). Around stars whose display peak exceeds 0.6, a narrow ring
+  (1–4 px outside the star mask) is compared with a reference ring (7–10 px). The step runs only with at least 10 such
+  stars, a mean blue/violet/magenta excess of the narrow ring over the reference of at least 0.003, and a share of
+  clearly coloured ring pixels at least 1.5 × the reference's. It then lowers the saturation of hues between −150° and
+  −30° (blue to magenta) in the ring by up to 80 %, keeping luminance. Uniform nebulosity around stars cancels in the
+  comparison, so reflection nebulae (M45) are left alone. Reported: the measurements and threshold.
+- **Dual-band defaults** (no switch; follows the filter). For linear RGB stacks recognized as H-alpha/OIII dual-band
+  (Seestar `LP`, `HaOIII`/`HOO` filter names, or the user's confirmation), star-based white balance and green removal
+  are skipped with the reason: stars are not white through such a filter and green carries OIII signal. Background
+  neutralization and gradient removal still run.
+
+**Star color** (Look slider, 0–1, colour images only). Inside the soft star mask, saturation about each pixel's
+luminance is raised by up to 1 + value (limited per pixel so no channel leaves [0, 1]); the sky and nebulae are not
+touched and white saturated cores stay white. Built-in values: Vivid 0.3, Star field 0.5, others 0.
+
+**Faster iteration (no output change).** Processing is split into a cached *linear stage* (reading, measurements, linear
+clean-up, noise estimate, star masks) and a *display stage*. A run whose linear inputs (image, linear recipe fields,
+backend and models) match a cached stage reuses it; the display stage then produces a result identical to a fresh run.
+The worker keeps at most two stages within 20 % of system RAM; failed or GPU-fallback stages are never cached. The
+report notes when the linear stage was reused.
+
+- **Live preview.** With **Live preview** on (default), changing settings for an image that already has a result
+  renders the new settings at full resolution (latest request wins; enhancement jobs are never interrupted) and shows
+  it in the viewer labelled **Live preview (not saved)**. Nothing is stored as a run until the user clicks **Save this
+  result** (Reprocess), which publishes exactly the previewed pixels. Previews live in the temporary folder and are
+  removed with the image.
+- **Preset quick looks.** **Preview presets on this image** renders each built-in preset on a ~1 MP block-averaged copy
+  (CPU, AI tools omitted, ≤ 480 px thumbnails, labelled as a reduced-size quick look; Auto shows the preset it would
+  choose). Clicking a thumbnail selects that preset.
+
+**Interface.** The enhancement panel has **Simple** (preset, quick looks, Sky brightness, Stretch, Noise reduction,
+live preview and Enhance; a line lists hidden settings that are on) and **All controls**; Simple is the default and
+the choice is remembered. **Use these settings** in the result history restores the settings a result was made with
+into the panel (nothing is reprocessed). **Stack frames…** gains **Browse…**: a read-only folder list (drives, common
+folders, recently stacked folders and their sibling `…_sub` folders, FITS counts) — only directory listings are read.
+**Edit export…** gains **Crop stacking edges**, which sets the framing to the largest centred window, at the image's
+aspect ratio, inside the largest rectangle of the result free of invalid and low-coverage pixels (found on 8 × 8 pixel
+blocks); disabled when there are no stacking edges or the window would need more than 4× zoom.
+
+**Tests.** Cosmetic correction repairs coloured hot and cold pixels and never a broadband spike, bright structure,
+protected pixels or a monochrome hot pixel; dual-band stacks skip white balance and green removal with reasons while
+broadband stacks apply them; Star color changes only star pixels, keeps luminance and stays in range; fringe reduction
+finds synthetic blue rings and keeps luminance, and reports nothing when the surroundings share the ring's colour; Auto
+choices follow the measurement rules and keep other settings; the clean rectangle excludes edges; a cached linear stage
+gives a display identical to a fresh run and is not reused when linear settings change; the live preview equals the
+saved result; preset quick looks are cached and served only through the allow-listed file route; folder browsing is
+read-only and token-protected. Browser tests cover the Simple panel, Auto's explanation, live preview and saving it,
+restoring settings, quick looks and choosing a stacking folder by browsing.
+
 ### Deferred
 
-Arbitrary cubes and multi-page stacks; plate solving; absolute flux calibration; star reduction/removal in exports;
-additional learned processing beyond the three opt-in tools; native installer; cloud hosting; accounts; remote
-mobile access; commercial billing.
+Arbitrary cubes and multi-page stacks; ~~plate solving~~ blind (hint-free) plate solving *(amended 1.7: hinted solving
+and header-WCS verification are in scope)*; absolute flux calibration; ~~star reduction/removal in exports~~
+*(amended 1.7: explicit Star size and on-request layer exports are in scope; automatic star removal or reduction stays
+excluded)*; additional learned processing beyond the four opt-in tools of amendments 1.5 and 1.7; super-resolution;
+native installer; cloud hosting; accounts; remote mobile access; commercial billing.
 
 Deliver an initial JPEG vertical slice first, but do not call the full version 1 complete until real TIFF and stacked FITS fixtures pass validation. Staged development is not permission to omit the requested formats.
 
@@ -316,11 +523,11 @@ Single CFA/raw frames display: **This file needs debayering or stacking first. E
 
 ### Enhancement panel
 
-*(Amended 1.3 — one-button Enhance.)* Preset menu: **Natural** (default), **Vivid**, **Faint detail**, **Bright core (HDR)**, **Star field**, **Seestar match**, **Custom**, and user-saved presets, each with a one-line description. Presets are rendering styles chosen by the user; nothing is inferred from the object's name. Below the menu, a **Look** section has six sliders whose values the preset sets and that map to documented, recorded parameters:
+*(Amended 1.3 — one-button Enhance.)* Preset menu: **Natural** (default), **Vivid**, **Faint detail**, **Bright core (HDR)**, **Star field**, **Seestar match**, **Custom**, and user-saved presets, each with a one-line description. Presets are rendering styles chosen by the user; nothing is inferred from the object's name. *(Amended 1.8: **Auto** is listed first and is the default; it chooses one of these styles per image from measurements, never from the name — see §4 "Amendment 1.8". The Look section adds a **Star color** slider (0–1) after Noise reduction, and the panel opens in a **Simple** view showing Sky brightness, Stretch and Noise reduction.)* Below the menu, a **Look** section has six sliders whose values the preset sets and that map to documented, recorded parameters:
 
 | Slider | Range | Behavior |
 |---|---|---|
-| Background | 0.04–0.25 | Display level of the median sky (MTF placement) |
+| Background (shown as **Sky brightness**) | 0.04–0.25 | Display level of the median sky (MTF placement) |
 | Stretch | −1…+1 | Shifts the auto-solved hyperbolic stretch factor by 0.75 decades per unit |
 | Contrast / Pop | 0–1 | S-curve anchored at the sky and white (amplitude 0.8 × value, monotonic) |
 | Color | 0–1 | Saturation 1 + 0.6 × value, protected below the sky noise and near white; unavailable for monochrome |
@@ -328,7 +535,18 @@ Single CFA/raw frames display: **This file needs debayering or stacking first. E
 | Noise reduction | 0–1 | Wavelet gated shrinkage, amount 0.9 × value relative to the measured per-scale noise |
 | Protect bright cores | on/off | Highlight-protecting stretch target and HDR core compression when a bright extended core is found |
 
-The supervised **Manual sky regions** correction (constant / planar) and **Preserve labels** remain as before. Advanced exposes switches for each automatic stage, the stretch on/off, opt-in deconvolution, exact values (stretch log D, b, highlight convergence, star softening, core compression, white-balance limit, gradient degree, green removal, denoise scales, detail scale, rendered midtone gain, manual background strength, deconvolution iterations), input state, protected regions and histogram diagnostics. *(The 1.2 table of switches with Gentle/Balanced/Strong buttons below is superseded.)*
+The supervised **Manual sky regions** correction (constant / planar; labelled **Correct background from my sky samples** in the app) and **Preserve labels** remain as before. Advanced exposes switches for each automatic stage, the stretch on/off, opt-in deconvolution, exact values (stretch log D, b, highlight convergence, star softening, core compression, white-balance limit, gradient degree, green removal, denoise scales, detail scale, rendered midtone gain, manual background strength, deconvolution iterations), input state, protected regions and histogram diagnostics. *(The 1.2 table of switches with Gentle/Balanced/Strong buttons below is superseded.)*
+
+*(Amended 1.7.)* None of these additions appear in the Look section, so the one-button path is unchanged.
+**AI tools** gains **AI sharpening** (switch, Download, and a Sharpening strength slider when on; Star sharpening in
+Advanced) and a **Star size** slider beside Star brightness, shown only when AI star separation is on for a linear
+stack. The colour tools gain **Star colours: Field stars (automatic) / Accurate (catalog)**, with a status line
+(catalog not installed → Download; sky solution from file, solved, or not available with the reason). Each image's
+details show its **Sky solution** (centre, scale, rotation, matches, RMS) with **Solve now** and, for files without
+hints, fields for approximate coordinates/field width or a target name. **Settings → Reference data** lists the star and
+object catalogs with size, version, licence and credit, with Download and Remove. **Edit export…** gains **Label
+objects**, **Compass (N/E)** and **Scale bar**. **More formats** lists the Starless/Stars exports only for runs that
+separated stars.
 
 <details><summary>Superseded 1.2 text</summary>
 
@@ -439,6 +657,13 @@ Monochrome stays monochrome. Unknown/narrowband channel mappings are preserved a
 
 *(Amended 1.3 — engine 1.1 linear path.)* The linear path runs two pixel groups. **Group A** (saved as processed-linear): supervised background (if confirmed) → automatic low-order gradient model (robust polynomial, degree ≤ 3, fitted to sigma-clipped sky boxes away from stars and extended signal; skipped with a reason when samples are insufficient, poorly distributed or the gradient is negligible) → background neutralization (per-channel sky from the dimmer 75 % of the frame, offset to one shared pedestal of 3σ) → bounded white balance from isolated, unsaturated field stars (gains limited to 1/1.25–1.25 by default, skipped when fewer than 15 stars or inconsistent colors) → optional deconvolution → à trous wavelet noise reduction. **Group B** (display only): hyperbolic luminance stretch `Ls = (asinh(D·L+b) − asinh(b)) / (asinh(D+b) − asinh(b))` with highlight convergence `rgb = Ls·(r(1−Ls^p) + Ls^p)` and color confidence near the sky; the white point is the data maximum; D is auto-solved so the 99.9th percentile of star-free signal lands at 0.88 (0.96 without core protection); an MTF then places the median sky exactly at the Background level with a floor 5σ below the sky. The frozen baseline ("Original") is a linked autostretch (median − 2.8σ shadows, sky at 0.15). Low-coverage borders are excluded from every statistic and never cropped. *(The asinh renderer above describes engine 1.0.)*
 
+*(Amended 1.7 — stage placement.)* Sky-solution verification or solving is an asset analysis task before the run;
+it never changes pixels. In group A, catalog gains from **Accurate star colours** replace the field-star white balance
+(same position), and **AI sharpening** runs after noise reduction, before the processed-linear array is saved, in place
+of deconvolution when both are requested. **Star size** acts in group B at star recomposition, after the gentler star
+stretch and before Star brightness. Layer exports read the stored separation results. Annotations are applied only in
+Edit export.
+
 ### Background correction requirements
 
 Version 1 supports constant background neutralization and an optional supervised first-order spatial correction. Require at least three non-overlapping confirmed patches for the constant model. For the planar model require at least six confirmed, widely distributed, non-collinear patches spanning both axes, with adequate valid pixels and low star contamination. Six is an initial engineering minimum, not proof of reliable sky. Validate coordinates, spatial coverage, sample counts and finite statistics server-side. Exclude stars, captions and invalid regions from estimates.
@@ -495,7 +720,15 @@ All endpoints below are local, versioned `/api/v1`. Use generated IDs rather tha
 | GET `/runs/{id}/exports/{kind}` | Stream full-resolution artifact |
 | POST `/exports/batch` | Build ZIP for selected completed run IDs |
 | GET `/exports/{id}` | ZIP progress or download descriptor |
+| POST `/exports/{id}/cancel` | Stop building a ZIP; the partial file is removed |
 | DELETE `/assets/{id}` | Remove app-owned data after explicit UI action; never external files |
+| POST `/assets/{id}/sky-solution` | *(1.7)* Verify the header WCS or solve from hints (optional typed coordinates, field width or target name); returns a task ID |
+| GET `/assets/{id}/sky-solution` | *(1.7)* Solution source, centre, scale, rotation, matches, RMS, or the reason none is available |
+| GET/POST/DELETE `/reference-data[/{id}]` | *(1.7)* List, download (pinned URL + SHA-256) or remove the star and object catalogs |
+| POST/GET/DELETE `/assets/{id}/live-preview` | *(1.8)* Start (latest wins), poll or cancel a live preview of a recipe; nothing is saved |
+| GET `/assets/{id}/live-preview/{live_id}` | *(1.8)* The live preview image (enhanced or fixed-mapping variant, optional ROI) |
+| POST `/assets/{id}/preset-previews` | *(1.8)* Reduced-size quick-look thumbnails for up to 16 recipes |
+| POST `/stacks/browse` | *(1.8)* Read-only folder listing for stacking (subfolders, FITS counts, recent folders) |
 
 Poll active jobs approximately once per second; back off in background tabs. No WebSocket is needed initially. Recipe changes create new runs. Immutable recipe snapshots avoid races when controls change during processing. Retries should be idempotent using a client request key; repeat button clicks must not duplicate expensive work. Cache keys include source hash, engine/dependency version, canonical recipe and per-file masks.
 
@@ -562,6 +795,10 @@ Sanitize names, block path traversal and archive bombs, validate file signatures
 - Local-contrast tests check neutral/off identity, full-resolution scale consistency, sky-noise gating, halos and tiled-filter seams.
 - Saved presets survive restart, validate schema/ranges, exclude per-image data and cannot mutate prior run snapshots.
 - Synthetic Gaussian stars and ramps detect halo/ringing, smearing, channel shifts and tile seams. Synthetic fixtures are tests only, never user output content.
+- *(1.7 A)* A real Seestar header WCS verifies within the thresholds; a deliberately shifted or rotated WCS fails verification. Synthetic star fields with known WCS are solved from hints to sub-pixel RMS, including flipped parity and arbitrary rotation. Wrong hints, too few stars and a missing catalog fail with reasons. The original file is unchanged and no network access occurs. Built-in catalog colour recovers known synthetic channel gains, refuses dual-band/narrowband inputs, falls back to field-star white balance with a reason and cannot be combined with a user CSV. The catalog download rejects a corrupted file.
+- *(1.7 B)* Annotation positions match synthetic WCS positions within 1 px after rotation, crop and pan; annotations appear only in the edited export; regular exports are byte-identical with and without annotations.
+- *(1.7 C)* With synthetic ONNX models: exact tiling, the stretch round-trip, the SNR gate (sky unchanged), saturated-core pass-through, fallback when the model is missing, deconvolution reported inactive when both are requested, and no super-resolution model in the registry. Real-model tests check that dimensions are unchanged and the report and `HISTORY` disclose the model.
+- *(1.7 D)* Star size: 100 % is identical to the current output; centroids move ≤ 0.1 px; FWHM is monotonic in the setting; the layer stays non-negative; the starless and processed-linear data are unchanged; the step is skipped without star separation. Layer exports: starless + stars equals processed-linear within float32 rounding; exports are offered only when separation ran; they are labelled and absent from the default ZIP.
 
 ### Required UI and batch tests
 
@@ -600,6 +837,9 @@ Do not build empty/mock processing endpoints and present them as working enhance
 
 ### Paste this into GitHub Copilot Chat
 
+*(Historical version 1 prompt. Where it differs from amendments 1.3–1.7 — for example on deconvolution, star
+reduction and stacking — the amendments govern.)*
+
 > Read `astro-photo-enhancer-app-spec.md` completely. Build the local Windows-first EasyAstroEnhance specified there using React/TypeScript and FastAPI/Python. Treat the fidelity requirements as mandatory. Implement in the six milestones, starting with a real JPEG upload-to-enhancement-to-comparison vertical slice. Keep the processing core independent of HTTP and UI. Add TIFF and stacked FITS through precision-preserving readers and a separate linear pipeline; never route them through an 8-bit conversion. Use no generative imaging, learned reconstruction, external reference images, cloud APIs or paid software. For each milestone, implement the code, run the required relevant checks and report working behavior and remaining limitations. Do not mark FITS support complete without a real FITS end-to-end test. Ask for a representative stacked FITS when needed; use clearly labeled synthetic FITS only for unit tests. Include direct brightness/shadows/highlights/black-point controls, optional gentle local contrast, star protection during stretching, supervised constant/planar background correction and reusable presets. Implement optional NVIDIA/CuPy acceleration for eligible stages with Auto/GPU/CPU settings, truthful backend status, bounded VRAM, classified CPU fallback and CPU/GPU equivalence tests. Verify on the RTX 5070 Ti before claiming target GPU support. Keep deconvolution, star reduction/removal and stacking deferred; the telescope supplies stacked FITS. Keep the main interface to upload, select enhancements, enhance, compare and download. Include exact setup/start/test commands and lock dependencies. Do not silently drop any acceptance criterion or introduce additional infrastructure without justification.
 
 ### Suggested `.github/copilot-instructions.md` content
@@ -633,6 +873,14 @@ The app implements common astronomical image-processing concepts independently. 
 - [Siril background extraction](https://siril.readthedocs.io/en/stable/processing/background.html): sampled spatial background modeling. The app's restricted planar implementation above is an independent proposed design.
 - [Siril StarNet workflow](https://siril.readthedocs.io/en/stable/processing/stars/starnet.html): context for deferred star separation/recomposition. StarNet is not a version 1 dependency.
 - [RC Astro deconvolution technical manual](https://www.rc-astro.com/blurxterminator-technical-manual/): context for deferring blur restoration; no RC Astro integration or algorithm equivalence is proposed.
+
+### Additional references for amendment 1.7
+
+- [Cosmic Clarity](https://github.com/setiastro/cosmicclarity) (MIT): Sharpen stellar/non-stellar ONNX models and reference implementation; release assets under the `Windows` tag.
+- [Gaia DR3](https://www.cosmos.esa.int/web/gaia/data-release-3): source catalog for star positions and colours; follow its credit and citation requirements.
+- [OpenNGC](https://github.com/mattiaverga/OpenNGC): candidate open deep-sky object catalog for annotations and name hints; record its licence.
+- [Calabretta & Greisen 2002, "Representations of celestial coordinates in FITS"](https://doi.org/10.1051/0004-6361:20021327) and the [SIP distortion convention](https://fits.gsfc.nasa.gov/registry/sip.html): WCS projection and distortion keywords.
+- [Astropy WCS](https://docs.astropy.org/en/stable/wcs/): reading, fitting and writing celestial WCS.
 
 ### GPU implementation references
 

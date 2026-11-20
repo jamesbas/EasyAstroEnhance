@@ -16,7 +16,7 @@ from ..processing.export import _clean_header
 from ..processing.imagedata import ProcessingError
 from ..processing.recipe import PIPELINE_VERSION
 from ..services import previews
-from ..services.exports import ALLOWED_KINDS, start_batch
+from ..services.exports import ALLOWED_KINDS, cancel_batch, ensure_export, start_batch
 from .common import ApiError, cfg_of, coord_of, db_of, serialize_run
 
 router = APIRouter(tags=["runs"])
@@ -31,7 +31,7 @@ def _run(request: Request, run_id: str) -> dict[str, Any]:
 
 
 @router.get("/runs")
-async def list_runs(request: Request, asset_id: str | None = None) -> dict[str, Any]:
+def list_runs(request: Request, asset_id: str | None = None) -> dict[str, Any]:
     db = db_of(request)
     rows = db.all("SELECT * FROM runs WHERE asset_id=? ORDER BY created_at DESC", (asset_id,)) if asset_id else db.all("SELECT * FROM runs ORDER BY created_at DESC LIMIT 200")
     out = []
@@ -42,13 +42,13 @@ async def list_runs(request: Request, asset_id: str | None = None) -> dict[str, 
 
 
 @router.get("/runs/{run_id}")
-async def get_run(request: Request, run_id: str) -> dict[str, Any]:
+def get_run(request: Request, run_id: str) -> dict[str, Any]:
     r = _run(request, run_id)
     report_path = cfg_of(request).runs_dir / run_id / "processing.json"
     applied = None
     if report_path.exists():
         full = json.loads(report_path.read_text(encoding="utf-8"))
-        applied = {k: full["applied"].get(k) for k in ("summary", "clipping", "execution", "protected_regions", "baseline_frame", "enhanced_frame", "linear_preparation", "decisions", "noise_estimate")}
+        applied = {k: full["applied"].get(k) for k in ("summary", "clipping", "execution", "protected_regions", "baseline_frame", "enhanced_frame", "linear_preparation", "decisions", "noise_estimate", "auto_preset")}
         applied["operations"] = full["applied"]["operations"]
     has_fixed = (cfg_of(request).runs_dir / run_id / "display_fixed.npy").exists()
     return {**serialize_run(r), "applied": applied, "has_fixed_mapping": has_fixed}
@@ -113,7 +113,10 @@ async def download_export(request: Request, run_id: str, kind: str):
     entry = next((e for e in run["exports"] or [] if e["kind"] == kind), None)
     if not entry:
         raise ApiError(404, "EXPORT_NOT_AVAILABLE", "That export is not available for this result.")
-    path = cfg_of(request).runs_dir / run_id / entry["filename"]
+    try:
+        path = await run_in_threadpool(ensure_export, cfg_of(request), db_of(request), run, entry)
+    except OSError as exc:
+        raise ApiError(404, "EXPORT_MISSING", "The file is no longer on disk.") from exc
     if not path.exists():
         raise ApiError(404, "EXPORT_MISSING", "The file is no longer on disk.")
     name = f"{(run['summary'] or {}).get('run_name', run_id)}-{entry['filename']}"
@@ -188,7 +191,7 @@ async def edit_export(request: Request, run_id: str, body: EditExportIn, preview
 
 # ------------------------------------------------------------------------------------------ batch ZIP
 @router.post("/exports/batch", status_code=202)
-async def batch_export(request: Request, body: BatchExportIn) -> dict[str, Any]:
+def batch_export(request: Request, body: BatchExportIn) -> dict[str, Any]:
     db, cfg = db_of(request), cfg_of(request)
     ids = [r for r in dict.fromkeys(body.run_ids) if db.one("SELECT 1 AS x FROM runs WHERE id=?", (r,))]
     if not ids:
@@ -198,15 +201,22 @@ async def batch_export(request: Request, body: BatchExportIn) -> dict[str, Any]:
 
 
 @router.get("/exports/{export_id}")
-async def export_status(request: Request, export_id: str) -> dict[str, Any]:
+def export_status(request: Request, export_id: str) -> dict[str, Any]:
     e = db_of(request).one("SELECT * FROM exports WHERE id=?", (export_id,))
     if not e:
         raise ApiError(404, "EXPORT_NOT_FOUND", "That export does not exist.")
     return {"id": e["id"], "state": e["state"], "detail": e["detail"], "download_url": f"/api/v1/exports/{export_id}/download" if e["state"] == "ready" else None}
 
 
+@router.post("/exports/{export_id}/cancel")
+def export_cancel(request: Request, export_id: str) -> dict[str, Any]:
+    if not db_of(request).one("SELECT id FROM exports WHERE id=?", (export_id,)):
+        raise ApiError(404, "EXPORT_NOT_FOUND", "That export does not exist.")
+    return {"id": export_id, "cancelling": cancel_batch(db_of(request), export_id)}
+
+
 @router.get("/exports/{export_id}/download")
-async def export_download(request: Request, export_id: str):
+def export_download(request: Request, export_id: str):
     e = db_of(request).one("SELECT * FROM exports WHERE id=?", (export_id,))
     if not e or e["state"] != "ready" or not e["path"] or not Path(e["path"]).exists():
         raise ApiError(404, "EXPORT_NOT_READY", "That ZIP is not ready.")
@@ -215,7 +225,7 @@ async def export_download(request: Request, export_id: str):
 
 # ------------------------------------------------------------------------------------------ history
 @router.get("/history/summary")
-async def history_summary(request: Request) -> dict[str, Any]:
+def history_summary(request: Request) -> dict[str, Any]:
     cfg, db = cfg_of(request), db_of(request)
 
     def size(p: Path) -> int:
@@ -231,7 +241,7 @@ async def history_summary(request: Request) -> dict[str, Any]:
 
 
 @router.delete("/history")
-async def clear_history(request: Request, body: ConfirmIn) -> dict[str, Any]:
+def clear_history(request: Request, body: ConfirmIn) -> dict[str, Any]:
     if not body.confirm:
         raise ApiError(400, "CONFIRM_REQUIRED", "Confirm to clear local history.")
     db, cfg = db_of(request), cfg_of(request)
@@ -252,5 +262,6 @@ async def clear_history(request: Request, body: ConfirmIn) -> dict[str, Any]:
         d.mkdir(parents=True, exist_ok=True)
     for table in ("job_items", "jobs", "runs", "assets", "exports", "stacks"):
         db.execute(f"DELETE FROM {table}")
+    coord_of(request).live_previews.clear()
     return {"cleared": True}
 

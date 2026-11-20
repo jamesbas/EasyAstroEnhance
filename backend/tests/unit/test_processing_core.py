@@ -280,6 +280,57 @@ def test_tiled_matches_full_frame_for_rendered_and_linear():
     np.testing.assert_allclose(t.processed, f.processed, rtol=1e-5, atol=1e-2)
 
 
+def _bright_core_stack():
+    lin = linear_field(h=320, w=380, n_stars=60, seed=3)
+    yy, xx = np.mgrid[0:320, 0:380]
+    core = 40000.0 * np.exp(-(((xx - 190) / 35.0) ** 2 + ((yy - 160) / 25.0) ** 2))
+    return make_image(lin + core[..., None].astype(np.float32), domain="linear", fmt="fits", dtype="float32", bits=32)
+
+
+def test_tiled_and_threaded_runs_are_bitwise_identical_to_full_frame(monkeypatch):
+    """Chained spatial stages (HDR -> detail, deconvolution -> denoise) need the sum of their footprints as halo."""
+    import app.processing.pipeline as pipeline
+
+    img = _bright_core_stack()
+    r = builtin_presets()["bright-core"].model_copy(update={"advanced": AdvancedRecipe(hdr_amount=0.8, deconvolution=True)})
+    full = run(img, r, cpu_threads=1)
+    ops = {o["name"]: o["status"] for o in full.report["operations"]}
+    assert ops["hdr"] == ops["detail"] == ops["denoise"] == ops["deconvolution"] == "applied"
+    tiled = run(img, r, force_tile=96)
+    monkeypatch.setattr(pipeline, "MIN_PARALLEL_PIXELS", 0)
+    threaded = run(img, r, cpu_threads=4)
+    assert threaded.report["execution"]["cpu_threads"] == 4 and threaded.report["execution"]["tile"] is not None
+    for other in (tiled, threaded):
+        assert np.array_equal(other.display, full.display)
+        assert np.array_equal(other.display_fixed, full.display_fixed)
+        assert np.array_equal(other.processed, full.processed)
+        assert other.report["clipping"]["final"] == full.report["clipping"]["final"]
+
+
+def test_wavelet_smoothing_matches_padded_reference():
+    from app.processing import wavelets
+
+    def reference(a, step, axis):
+        n, pad = a.shape[axis], 2 * step
+        widths = [(0, 0)] * a.ndim
+        widths[axis] = (pad, pad)
+        p = np.pad(a, widths, mode="edge" if n <= pad else "reflect")
+        out = None
+        for k, wk in enumerate(wavelets.B3):
+            sl = [slice(None)] * a.ndim
+            sl[axis] = slice(k * step, k * step + n)
+            term = p[tuple(sl)] * a.dtype.type(wk)
+            out = term if out is None else out + term
+        return out
+
+    rng = np.random.default_rng(5)
+    for n in (1, 2, 3, 4, 5, 8, 9, 16, 17, 33, 70):
+        for step in (1, 2, 4, 8):
+            a = rng.random((n, 6, 3), dtype=np.float32)
+            for axis in (0, 1):
+                assert np.array_equal(wavelets._smooth_axis(np, a, step, axis), reference(a, step, axis)), (n, step, axis)
+
+
 def test_repeated_processing_is_deterministic():
     arr, _ = synthetic_field(seed=8)
     r = builtin_presets()["vivid"]

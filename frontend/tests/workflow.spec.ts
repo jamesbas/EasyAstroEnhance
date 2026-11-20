@@ -1,10 +1,11 @@
 import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
-import { LARGE_JPEG, TEST_JPEG, collectConsoleErrors, enhanceAndWait, resetBackend, uploadAndWaitReady, withAnalysisFallback } from './helpers';
+import { LARGE_JPEG, TEST_JPEG, collectConsoleErrors, enhanceAndWait, resetBackend, showAllControls, uploadAndWaitReady, withAnalysisFallback } from './helpers';
 
 test.describe('upload, enhance, compare, download', () => {
-  test.beforeEach(async ({ request }) => {
+  test.beforeEach(async ({ page, request }) => {
     await resetBackend(request);
+    await showAllControls(page);
   });
 
   test('full workflow with a JPEG', async ({ page, request }) => {
@@ -22,7 +23,7 @@ test.describe('upload, enhance, compare, download', () => {
     await expect(page.getByTestId('compare-viewer')).toBeVisible();
     await expect(page.getByTestId('label-original')).toHaveText('Original view');
     await expect(page.getByTestId('enhance-selected')).toContainText('1 selected');
-    await expect(page.getByTestId('preset-select')).toHaveValue('natural');
+    await expect(page.getByTestId('preset-select')).toHaveValue('auto');
 
     await enhanceAndWait(page);
     await expect(page.getByTestId('result-note')).toContainText('Noise reduced');
@@ -68,6 +69,7 @@ test.describe('upload, enhance, compare, download', () => {
     // More formats lists the run's exports.
     await page.getByTestId('more-formats').click();
     await expect(page.getByTestId('export-tiff')).toBeVisible();
+    await expect(page.getByTestId('export-tiff')).toContainText('made when downloaded');
     await expect(page.getByTestId('export-report')).toBeVisible();
     await page.keyboard.press('Escape');
 
@@ -85,7 +87,7 @@ test.describe('upload, enhance, compare, download', () => {
     await expect(brightness).toHaveValue('0');
     await brightness.fill('0.5');
     await expect(page.getByLabel('Brightness value')).toHaveValue('0.50');
-    await expect(page.getByTestId('preset-select')).toHaveValue('custom');
+    await expect(page.getByTestId('preset-select')).toHaveValue('auto'); // tone changes keep Auto choosing the look
     await expect(page.getByTestId('settings-changed')).toBeVisible();
 
     await page.getByTestId('slider-black-point').fill('0.05');
@@ -110,7 +112,7 @@ test.describe('upload, enhance, compare, download', () => {
   test('presets can be saved, renamed, duplicated and deleted', async ({ page }) => {
     await page.goto('/');
     await uploadAndWaitReady(page);
-    await expect(page.getByTestId('preset-select')).toHaveValue('natural');
+    await expect(page.getByTestId('preset-select')).toHaveValue('auto');
     await expect(page.getByTestId('look-controls')).toBeVisible();
     await page.getByTestId('preset-select').selectOption('vivid');
     await expect(page.getByTestId('value-color')).toHaveText('0.60');

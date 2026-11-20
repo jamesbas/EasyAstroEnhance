@@ -5,6 +5,8 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from ..models.api import ComputePatch, SettingsPatch
+from ..services.retention import SETTING as RETENTION_SETTING
+from ..services.retention import keep_per_image
 from .common import cfg_of, coord_of, db_of, run_worker_task, settings_snapshot
 
 router = APIRouter(tags=["settings"])
@@ -44,7 +46,7 @@ def _compute_view(request: Request) -> dict[str, Any]:
 
 
 @router.get("/compute")
-async def get_compute(request: Request) -> dict[str, Any]:
+def get_compute(request: Request) -> dict[str, Any]:
     return _compute_view(request)
 
 
@@ -55,7 +57,7 @@ async def probe_compute(request: Request) -> dict[str, Any]:
 
 
 @router.patch("/settings/compute")
-async def patch_compute(request: Request, body: ComputePatch) -> dict[str, Any]:
+def patch_compute(request: Request, body: ComputePatch) -> dict[str, Any]:
     db = db_of(request)
     for k, v in body.model_dump(exclude_none=True).items():
         db.set_setting(f"compute.{k}", v)
@@ -63,18 +65,21 @@ async def patch_compute(request: Request, body: ComputePatch) -> dict[str, Any]:
 
 
 @router.get("/settings")
-async def get_settings(request: Request) -> dict[str, Any]:
+def get_settings(request: Request) -> dict[str, Any]:
     db, cfg = db_of(request), cfg_of(request)
     snap = settings_snapshot(db, cfg)
     return {
         "compute": _compute_view(request), "strip_location": snap["strip_location"],
+        "keep_runs_per_image": keep_per_image(db),
         "limits": {"max_files": cfg.max_files, "max_file_mib": cfg.max_file_bytes // (1024 * 1024), "max_megapixels": cfg.max_pixels // 1_000_000},
         "data_dir": str(cfg.data_dir),
     }
 
 
 @router.patch("/settings")
-async def patch_settings(request: Request, body: SettingsPatch) -> dict[str, Any]:
+def patch_settings(request: Request, body: SettingsPatch) -> dict[str, Any]:
     if body.strip_location is not None:
         db_of(request).set_setting("strip_location", body.strip_location)
-    return await get_settings(request)
+    if body.keep_runs_per_image is not None:
+        db_of(request).set_setting(RETENTION_SETTING, body.keep_runs_per_image)
+    return get_settings(request)

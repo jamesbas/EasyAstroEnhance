@@ -23,6 +23,7 @@ from ..db import Database, new_id, now
 from ..processing.pipeline import ExecutionOptions, choose_backend
 from ..processing.recipe import PIPELINE_VERSION, parse_recipe
 from ..processing.report import dependency_versions
+from .retention import prune_runs
 from .worker import worker_main
 
 
@@ -48,6 +49,7 @@ class Coordinator:
         self._threads: list[threading.Thread] = []
         self.probe_info: dict[str, Any] | None = None
         self.live: dict[str, dict[str, Any]] = {}  # item_id -> live stage/label
+        self.live_previews: dict[str, dict[str, Any]] = {}  # asset_id -> latest live preview state (ephemeral)
 
     # ------------------------------------------------------------------ lifecycle
     def start(self) -> None:
@@ -108,6 +110,60 @@ class Coordinator:
             self._small.append((task, fut))
             self._cond.notify_all()
         return fut
+
+    # ------------------------------------------------------------------ live previews (latest request wins)
+    def request_live(self, asset: dict[str, Any], recipe: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+        """Queue a live preview for one image. Older queued live previews are dropped and a running one is cancelled, so
+        dragging a slider never builds a backlog; an enhancement job that is already running is never interrupted."""
+        live_id = new_id("lp_")
+        asset_id = asset["id"]
+        with self._cond:
+            keep = []
+            for task, fut in self._small:
+                if task["kind"] == "live":
+                    fut.cancel()
+                else:
+                    keep.append((task, fut))
+            self._small = keep
+            if self._current is not None and self._current["kind"] == "live":
+                self._cancel.set()
+        state = {"id": live_id, "state": "queued", "stage": None, "recipe": recipe, "result": None, "error": None, "created_at": now()}
+        self.live_previews[asset_id] = state
+        payload = {"asset": self._asset_payload(asset), "recipe": recipe, "live_id": live_id, "asset_id": asset_id,
+                   "out_dir": str(self.cfg.tmp_dir / "live" / asset_id),
+                   "settings": {**settings, "gpu_memory_fraction": self.cfg.gpu_memory_fraction}}
+        fut = self.run_task("live", payload)
+        fut.add_done_callback(lambda f, aid=asset_id, lid=live_id: self._on_live_done(aid, lid, f))
+        return state
+
+    def cancel_live(self, asset_id: str) -> None:
+        st = self.live_previews.get(asset_id)
+        if not st or st["state"] not in ("queued", "running"):
+            return
+        with self._cond:
+            keep = []
+            for task, fut in self._small:
+                if task["kind"] == "live" and task["asset_id"] == asset_id:
+                    fut.cancel()
+                else:
+                    keep.append((task, fut))
+            self._small = keep
+            cur = self._current
+            if cur is not None and cur["kind"] == "live" and cur["task"].get("asset_id") == asset_id:
+                self._cancel.set()
+
+    def _on_live_done(self, asset_id: str, live_id: str, fut: Future) -> None:
+        st = self.live_previews.get(asset_id)
+        if not st or st["id"] != live_id:
+            return  # superseded by a newer request
+        if fut.cancelled():
+            st.update(state="cancelled", stage=None)
+            return
+        exc = fut.exception()
+        if exc is not None:
+            st.update(state="failed", stage=None, error=exc.error if isinstance(exc, TaskError) else {"code": "INTERNAL_ERROR", "message": str(exc)})
+            return
+        st.update(state="ready", stage=None, result=fut.result())
 
     def enqueue_prepare(self, asset_id: str) -> None:
         asset = self.db.one("SELECT * FROM assets WHERE id=?", (asset_id,))
@@ -340,6 +396,10 @@ class Coordinator:
                     return
                 if self._small:
                     task, fut = self._small.pop(0)
+                    if task["kind"] == "live":
+                        st = self.live_previews.get(task["asset_id"])
+                        if st and st["id"] == task["live_id"]:
+                            st["state"] = "running"
                     self._dispatch({"task": task, "kind": task["kind"], "future": fut, "task_id": task["task_id"]})
                     continue
             item, stk = self._next_item(), self._next_stack()
@@ -430,6 +490,11 @@ class Coordinator:
         if cur is None or cur["task_id"] != task_id:
             return
         if kind == "progress":
+            if cur["kind"] == "live":
+                st = self.live_previews.get(cur["task"].get("asset_id", ""))
+                if st and st["id"] == cur["task"].get("live_id") and "stage" in payload:
+                    st["stage"] = payload["stage"]
+                return
             if cur["kind"] == "stack":
                 self.live[cur["stack_id"]] = {"stage": payload.get("stage"), "progress": payload.get("fraction")}
                 self.db.update("stacks", cur["stack_id"], {"stage": payload.get("stage"), "progress": payload.get("fraction"), "updated_at": now()})
@@ -478,6 +543,10 @@ class Coordinator:
                 "exports": payload["exports"], "report_path": payload["report_path"], "needs_review": int(payload["needs_review"]), "backend_label": payload["backend_label"],
             })
             self.db.update("job_items", item_id, {"state": payload["state"], "run_id": cur["run_id"], "notes": notes, "finished_at": t, "stage": None, "backend_label": payload["backend_label"]})
+            try:
+                prune_runs(self.cfg, self.db, cur["asset_id"])
+            except Exception:  # retention is housekeeping; never fail a finished run because of it
+                pass
         elif kind == "cancelled":
             self.db.update("job_items", item_id, {"state": "cancelled", "finished_at": t, "stage": None})
         else:

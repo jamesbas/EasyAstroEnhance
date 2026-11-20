@@ -30,13 +30,17 @@ export interface LookSliderSpec {
 
 // Bounds mirror LookRecipe in backend/app/processing/recipe.py. Every slider changes a documented parameter.
 export const LOOK_SLIDERS: LookSliderSpec[] = [
-  { key: 'background', id: 'background-level', label: 'Background', min: 0.04, max: 0.25, step: 0.01, left: 'Darker', right: 'Brighter', hint: 'Brightness of the empty sky on screen' },
+  { key: 'background', id: 'background-level', label: 'Sky brightness', min: 0.04, max: 0.25, step: 0.01, left: 'Darker', right: 'Brighter', hint: 'Brightness of the empty sky on screen' },
   { key: 'stretch', id: 'stretch', label: 'Stretch', min: -1, max: 1, step: 0.05, left: 'Gentle', right: 'Deep', hint: 'How strongly faint signal is lifted, relative to the automatic choice' },
   { key: 'contrast', id: 'contrast', label: 'Contrast / Pop', min: 0, max: 1, step: 0.05, left: 'Off', right: 'Strong', hint: 'A finishing S-curve anchored at the sky' },
   { key: 'color', id: 'color', label: 'Color', min: 0, max: 1, step: 0.05, left: 'Off', right: 'Strong', hint: 'Saturation of the color already in the image (not in the dark sky)', colorOnly: true },
   { key: 'detail', id: 'detail', label: 'Detail', min: 0, max: 1, step: 0.05, left: 'Off', right: 'Strong', hint: 'Multiscale local contrast on real structure, never on noise or stars' },
   { key: 'noise', id: 'noise', label: 'Noise reduction', min: 0, max: 1, step: 0.05, left: 'Off', right: 'Strong', hint: 'Relative to the noise measured in this image' },
+  { key: 'star_color', id: 'star-color', label: 'Star color', min: 0, max: 1, step: 0.05, left: 'Off', right: 'Strong', hint: 'Brings out the existing color of stars (never changes the sky or nebula)', colorOnly: true },
 ];
+
+// The Simple panel shows only these look sliders; All controls shows every one.
+export const SIMPLE_SLIDERS: LookKey[] = ['background', 'stretch', 'noise'];
 
 export interface AutoStageSpec {
   key: keyof AutoRecipe;
@@ -49,7 +53,9 @@ export const AUTO_STAGES: AutoStageSpec[] = [
   { key: 'gradient', label: 'Remove gradients', hint: 'Light pollution / moonlight glow, linear stacks only; skipped when the target fills the frame' },
   { key: 'white_balance', label: 'Balance color from stars', hint: 'Bounded gains so the average field star is white (not photometric calibration)' },
   { key: 'green_removal', label: 'Remove green cast', hint: 'Only when green remains after balancing' },
-  { key: 'star_stretch', label: 'Keep stars small', hint: 'A gentler stretch inside confident star masks (never removes or shrinks stars)' },
+  { key: 'star_stretch', label: 'Gentler stretch on stars', hint: 'Stretches confident star areas less so they stay compact (never removes or shrinks stars)' },
+  { key: 'cosmetic', label: 'Repair hot and cold pixels', hint: 'Single colored hot pixels and dark pixels on the sky background, linear stacks only (stars are never touched)' },
+  { key: 'halo_reduction', label: 'Reduce star color fringes', hint: 'Only when bright stars have a blue/violet ring clearly stronger than their surroundings' },
 ];
 
 export interface NumericBound {
@@ -79,6 +85,7 @@ export const ADVANCED_BOUNDS: NumericBound[] = [
 ];
 
 export const PRESET_DESCRIPTIONS: Record<string, string> = {
+  auto: 'Measures each image (bright core, faint nebulosity, star field) and picks the best style for it. Recommended.',
   natural: 'Balanced, faithful result: neutral sky, protected cores, gentle color and contrast.',
   vivid: 'Darker sky, more pop, color and detail — the "make it pop" look.',
   'faint-detail': 'Deeper stretch and stronger noise reduction for dim nebulae and galaxy outskirts.',
@@ -101,9 +108,15 @@ function sortKeys(value: unknown): unknown {
   return value;
 }
 
-// The preset label is bookkeeping; two recipes with identical settings are the same intent.
+// The preset label is bookkeeping; two recipes with identical settings are the same intent. With Auto, the look shown
+// in the sliders is what Auto chose for the image; it is not an input, so it is left out of the comparison.
 export function normalizeRecipe(r: Recipe): string {
   const { preset: _preset, ...rest } = r;
+  if (r.auto_preset) {
+    const { look: _look, advanced, ...others } = rest;
+    const { hdr_amount: _h, star_stretch_amount: _s, ...adv } = advanced;
+    return JSON.stringify(sortKeys({ ...others, advanced: adv }));
+  }
   return JSON.stringify(sortKeys(rest));
 }
 

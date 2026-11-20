@@ -23,6 +23,7 @@ from .backends.numpy_backend import NumpyBackend
 from .color import luminance
 from .diagnostics import median_mad_sigma
 from .masks import masked_gaussian
+from .parallel import thread_map
 
 SIGMA_FINE = 0.8  # residual scale used by the global noise estimate (reporting, background tools)
 SIGMA_CHROMA = 2.0
@@ -119,21 +120,23 @@ def _fill(be, x, weight):
 
 
 def estimate_wavelet_noise(
-    x: np.ndarray, weight: np.ndarray, star_hard: np.ndarray | None, n_lum: int, n_chroma: int, floor: float
+    x: np.ndarray, weight: np.ndarray, star_hard: np.ndarray | None, n_lum: int, n_chroma: int, floor: float,
+    threads: int = 1,
 ) -> WaveletNoise:
-    """Per-scale noise of luminance and chroma detail planes from deterministic sample tiles (tile-independent)."""
+    """Per-scale noise of luminance and chroma detail planes from deterministic sample tiles (tile-independent).
+    The sample tiles may be decomposed on ``threads`` threads; samples are pooled in tile order."""
     be = NumpyBackend()
     h, w = weight.shape
     pad = halo(n_lum, n_chroma)
     size = SAMPLE_TILE
-    lum_samples: list[list[np.ndarray]] = [[] for _ in range(n_lum)]
-    chr_samples: list[list[np.ndarray]] = [[] for _ in range(n_chroma)]
-    for y0, x0 in _sample_boxes(h, w, size):
+
+    def box(origin):
+        y0, x0 = origin
         oy0, oy1 = max(0, y0 - pad), min(h, y0 + size + pad)
         ox0, ox1 = max(0, x0 - pad), min(w, x0 + size + pad)
         wt = weight[oy0:oy1, ox0:ox1].astype(np.float32)
         if wt.mean() < 0.5:
-            continue
+            return None
         xt = _fill(be, x[oy0:oy1, ox0:ox1].astype(np.float32), wt)
         iy0, ix0 = y0 - oy0, x0 - ox0
         sl = (slice(iy0, iy0 + min(size, h - y0)), slice(ix0, ix0 + min(size, w - x0)))
@@ -141,15 +144,25 @@ def estimate_wavelet_noise(
         if star_hard is not None:
             use = use & ~star_hard[oy0:oy1, ox0:ox1][sl]
         if not use.any():
-            continue
+            return None
         L = luminance(np, xt)
         planes, _ = wavelets.decompose(np, L, n_lum)
-        for j, p in enumerate(planes):
-            lum_samples[j].append(p[sl][use])
+        lum = [p[sl][use] for p in planes]
+        chroma = []
         if xt.ndim == 3:
             planes_c, _ = wavelets.decompose(np, xt - L[..., None], n_chroma)
-            for j, p in enumerate(planes_c):
-                chr_samples[j].append(p[sl][use].reshape(-1))
+            chroma = [p[sl][use].reshape(-1) for p in planes_c]
+        return lum, chroma
+
+    lum_samples: list[list[np.ndarray]] = [[] for _ in range(n_lum)]
+    chr_samples: list[list[np.ndarray]] = [[] for _ in range(n_chroma)]
+    for got in thread_map(box, _sample_boxes(h, w, size), threads):
+        if got is None:
+            continue
+        for j, v in enumerate(got[0]):
+            lum_samples[j].append(v)
+        for j, v in enumerate(got[1]):
+            chr_samples[j].append(v)
     def sig(samples):
         if not samples:
             return floor

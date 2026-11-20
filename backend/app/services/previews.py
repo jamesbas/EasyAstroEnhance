@@ -20,6 +20,14 @@ def u16_to_u8(a: np.ndarray) -> np.ndarray:
     return ((a.astype(np.uint32) * 255 + 32767) // 65535).astype(np.uint8)
 
 
+def _to_u8_banded(a: np.ndarray, rows: int = 256) -> np.ndarray:
+    """``u16_to_u8`` in row bands, so a full-size uint32 temporary is never allocated."""
+    out = np.empty(a.shape, dtype=np.uint8)
+    for y in range(0, a.shape[0], rows):
+        out[y : y + rows] = u16_to_u8(np.asarray(a[y : y + rows]))
+    return out
+
+
 def open_display(path: Path) -> np.ndarray:
     if not path.exists():
         raise ProcessingError("NOT_FOUND", "The requested image is not available.")
@@ -44,7 +52,7 @@ def render(path: Path, roi: tuple[int, int, int, int] | None, max_edge: int = MA
     else:
         x, y, w, h = 0, 0, W, H
     scale = min(1.0, max_edge / max(w, h))
-    tile = u16_to_u8(np.asarray(arr[y : y + h, x : x + w]))
+    tile = _to_u8_banded(arr[y : y + h, x : x + w])
     mode = "RGB" if tile.ndim == 3 else "L"
     im = Image.fromarray(tile, mode)
     if scale < 1.0:

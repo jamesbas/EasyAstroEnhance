@@ -25,9 +25,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.processing.backends import probe_cuda  # noqa: E402
 from app.processing.export import write_jpeg, write_png  # noqa: E402
 from app.processing.imagedata import ImageData, Normalization  # noqa: E402
-from app.processing.pipeline import AssetContext, ExecutionOptions, run_pipeline  # noqa: E402
+from app.processing.pipeline import AssetContext, ExecutionOptions, cpu_threads, run_pipeline  # noqa: E402
 from app.processing.readers import inspect_file, read_image  # noqa: E402
-from app.processing.recipe import Recipe, builtin_presets  # noqa: E402
+from app.processing.recipe import PIPELINE_VERSION, Recipe, builtin_presets  # noqa: E402
 
 SIZES = [
     ("1920x1080 (2.1 MP, Seestar-like)", 1080, 1920),
@@ -126,7 +126,11 @@ def main() -> None:
     }
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    lines = ["# Benchmarks (synthetic data, Brighter detail + gentle local contrast)", "", "Measured by `tools/benchmark.py`. Hardware: " + json.dumps(hw), ""]
+    lines = [
+        f"# Benchmarks (synthetic data, Vivid preset, engine {PIPELINE_VERSION})", "",
+        "Measured by `tools/benchmark.py`. CPU runs use up to "
+        f"{cpu_threads(ExecutionOptions())} threads (parallel tiles; identical output to one full-frame pass). Hardware: " + json.dumps(hw), "",
+    ]
     if cold:
         lines += [f"Cold start (first GPU run, 256x256): {cold['first_gpu_run_total_s']:.2f} s - {cold['note']}.", ""]
     lines += [

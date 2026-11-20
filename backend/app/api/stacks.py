@@ -12,9 +12,10 @@ from fastapi import APIRouter, Request
 from fastapi.concurrency import run_in_threadpool
 
 from ..db import Database, new_id, now
-from ..models.api import StackCreate, StackFolders
+from ..models.api import FolderBrowseIn, StackCreate, StackFolders
 from ..processing.imagedata import ProcessingError
 from ..processing.stacking.stack import StackRequest, plan
+from ..services import folders
 from ..services.queue import Coordinator
 from .common import STATUS_LABELS, ApiError, cfg_of, coord_of, db_of, settings_snapshot
 
@@ -60,6 +61,14 @@ def _name_for(req: StackRequest) -> str:
     return stem[:-4] if stem.lower().endswith("_sub") else stem
 
 
+@router.post("/browse")
+async def browse_folders(request: Request, body: FolderBrowseIn) -> dict[str, Any]:
+    """List the subfolders of a folder (names and FITS counts only, read-only). Without a path: drives, common folders,
+    recently stacked folders and their sibling ``*_sub`` folders."""
+    recent = db_of(request).get_setting(folders.RECENT_SETTING, []) or []
+    return await run_in_threadpool(folders.browse, body.path, recent)
+
+
 @router.post("/scan")
 async def scan(request: Request, body: StackFolders) -> dict[str, Any]:
     req = _request_of(body)
@@ -95,11 +104,12 @@ async def create_stack(request: Request, body: StackCreate) -> dict[str, Any]:
         "preset_snapshot": snapshot, "settings_snapshot": settings_snapshot(db, cfg),
     })
     coord.wake()
+    db.set_setting(folders.RECENT_SETTING, folders.remember(db.get_setting(folders.RECENT_SETTING, []) or [], req.folder))
     return {**serialize_stack(db, coord, db.one("SELECT * FROM stacks WHERE id=?", (stack_id,))), "idempotent_replay": False}  # type: ignore[arg-type]
 
 
 @router.get("")
-async def list_stacks(request: Request, active: bool = False) -> dict[str, Any]:
+def list_stacks(request: Request, active: bool = False) -> dict[str, Any]:
     db, coord = db_of(request), coord_of(request)
     where = "WHERE state IN ('queued','running')" if active else ""
     return {"stacks": [serialize_stack(db, coord, s) for s in db.all(f"SELECT * FROM stacks {where} ORDER BY created_at DESC LIMIT 50")]}
@@ -113,7 +123,7 @@ def _get(request: Request, stack_id: str) -> dict[str, Any]:
 
 
 @router.get("/{stack_id}")
-async def get_stack(request: Request, stack_id: str) -> dict[str, Any]:
+def get_stack(request: Request, stack_id: str) -> dict[str, Any]:
     s = _get(request, stack_id)
     out = serialize_stack(db_of(request), coord_of(request), s)
     out["full_report"] = s.get("report")
@@ -121,14 +131,14 @@ async def get_stack(request: Request, stack_id: str) -> dict[str, Any]:
 
 
 @router.post("/{stack_id}/cancel")
-async def cancel_stack(request: Request, stack_id: str) -> dict[str, Any]:
+def cancel_stack(request: Request, stack_id: str) -> dict[str, Any]:
     _get(request, stack_id)
     coord_of(request).cancel_stack(stack_id)
     return serialize_stack(db_of(request), coord_of(request), _get(request, stack_id))
 
 
 @router.post("/{stack_id}/retry")
-async def retry_stack(request: Request, stack_id: str) -> dict[str, Any]:
+def retry_stack(request: Request, stack_id: str) -> dict[str, Any]:
     _get(request, stack_id)
     coord_of(request).retry_stack(stack_id)
     return serialize_stack(db_of(request), coord_of(request), _get(request, stack_id))

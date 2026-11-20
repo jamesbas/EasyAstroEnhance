@@ -128,6 +128,120 @@ def test_enhance_end_to_end_and_exports(client, tmp_path):
     assert Image.open(io.BytesIO(roi.content)).size == (64, 48) and roi.headers["X-Preview-Downsampled"] == "0"
 
 
+def test_display_tiff_is_rendered_on_request_with_the_stored_values(client, tmp_path):
+    import hashlib
+
+    import tifffile
+
+    arr, _ = synthetic_field(seed=21)
+    a = ready(client, upload(client, write_jpeg(tmp_path / "lazy.jpg", arr))["id"])
+    run_id = run_job(client, [a["id"]], default_recipe(client), key="lazy-tiff-01")["items"][0]["run_id"]
+    entry = next(e for e in client.get(f"/api/v1/runs/{run_id}").json()["exports"] if e["kind"] == "tiff")
+    run_dir = client.cfg.runs_dir / run_id
+    assert entry["deferred"] and entry["bytes"] is None and not (run_dir / entry["filename"]).exists()
+    r = client.get(f"/api/v1/runs/{run_id}/exports/tiff")
+    assert r.status_code == 200
+    assert np.array_equal(tifffile.imread(io.BytesIO(r.content)), np.load(run_dir / "display.npy"))  # = quantize(display, 16)
+    entry = next(e for e in client.get(f"/api/v1/runs/{run_id}").json()["exports"] if e["kind"] == "tiff")
+    assert entry["sha256"] == hashlib.sha256(r.content).hexdigest() and entry["bytes"] == len(r.content)
+    assert client.get(f"/api/v1/runs/{run_id}/exports/tiff").content == r.content  # rendered once, then served
+
+
+def test_retention_keeps_the_newest_results_per_image(client, tmp_path):
+    arr, _ = synthetic_field(seed=22)
+    a = ready(client, upload(client, write_jpeg(tmp_path / "keep.jpg", arr))["id"])
+    assert client.get("/api/v1/settings").json()["keep_runs_per_image"] == 0  # default: keep everything
+    first = run_job(client, [a["id"]], default_recipe(client), key="keep-run-01")["items"][0]["run_id"]
+    assert client.patch("/api/v1/settings", json={"keep_runs_per_image": 1}).json()["keep_runs_per_image"] == 1
+    second = run_job(client, [a["id"]], default_recipe(client), key="keep-run-02", force=True)["items"][0]["run_id"]
+    runs = [r["id"] for r in client.get("/api/v1/runs", params={"asset_id": a["id"]}).json()["runs"]]
+    assert runs == [second] and not (client.cfg.runs_dir / first).exists()
+    assert client.get(f"/api/v1/runs/{first}").status_code == 404
+    assert client.get(f"/api/v1/assets/{a['id']}").json()["latest_run"]["id"] == second
+
+
+def test_live_preview_is_exactly_what_enhance_publishes(client, tmp_path):
+    arr, _ = synthetic_field(seed=24)
+    a = ready(client, upload(client, write_jpeg(tmp_path / "live.jpg", arr))["id"])
+    run_job(client, [a["id"]], default_recipe(client, "natural"), key="live-base-01")
+    vivid = default_recipe(client, "vivid")
+
+    def finished():
+        s = client.get(f"/api/v1/assets/{a['id']}/live-preview").json()
+        return s if s["state"] in ("ready", "failed", "cancelled") else None
+
+    started = client.post(f"/api/v1/assets/{a['id']}/live-preview", json={"recipe": vivid})
+    assert started.status_code == 202 and started.json()["state"] in ("queued", "running")
+    st = wait_for(finished)
+    assert st["state"] == "ready" and st["recipe"]["preset"] == "vivid" and st["summary"]
+    assert st["reused"] is True  # natural and vivid share the linear stage, so only the display stage ran
+    img = client.get(st["preview_url"])
+    assert img.status_code == 200 and img.headers["X-Source-Width"] == "256"
+    live = np.load(client.cfg.tmp_dir / "live" / a["id"] / f"{st['id']}.npy")
+    run_id = run_job(client, [a["id"]], vivid, key="live-save-01")["items"][0]["run_id"]
+    assert np.array_equal(np.load(client.cfg.runs_dir / run_id / "display.npy"), live)
+    report = client.get(f"/api/v1/runs/{run_id}/exports/report").json()["applied"]
+    assert report["linear_stage_cache"]["display_reused"] is True
+    # a newer request supersedes an older one; deleting the image removes its previews
+    client.post(f"/api/v1/assets/{a['id']}/live-preview", json={"recipe": default_recipe(client, "natural")})
+    assert wait_for(finished)["recipe"]["preset"] == "natural"
+    client.delete(f"/api/v1/assets/{a['id']}")
+    assert not (client.cfg.tmp_dir / "live" / a["id"]).exists()
+
+
+def test_preset_previews_render_quick_looks_and_auto_reports_its_choice(client, tmp_path):
+    arr, _ = synthetic_field(seed=25)
+    a = ready(client, upload(client, write_jpeg(tmp_path / "pp.jpg", arr))["id"])
+    items = [{"id": p, "recipe": default_recipe(client, p)} for p in ("auto", "natural", "vivid")]
+    r = client.post(f"/api/v1/assets/{a['id']}/preset-previews", json={"items": items})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert [i["id"] for i in out["items"]] == ["auto", "natural", "vivid"] and out["note"]
+    assert out["items"][0]["auto"] and out["items"][1]["auto"] is None  # Auto names the preset it chose
+    first = client.get(out["items"][1]["url"])
+    assert first.status_code == 200 and first.headers["content-type"] == "image/jpeg"
+    assert max(Image.open(io.BytesIO(first.content)).size) <= 480
+    again = client.post(f"/api/v1/assets/{a['id']}/preset-previews", json={"items": items[1:2]}).json()
+    assert again["items"][0]["file"] == out["items"][1]["file"]  # same settings: the cached thumbnail is reused
+    assert client.get(f"/api/v1/assets/{a['id']}/files/presetprev-..%2Fx.jpg").status_code == 404
+
+
+def test_folder_browse_lists_fits_counts_read_only(client, tmp_path):
+    root = tmp_path / "MyWorks"
+    (root / "M 42_sub").mkdir(parents=True)
+    (root / "M 31").mkdir()
+    for i in range(3):
+        (root / "M 42_sub" / f"Light_{i}.fit").write_bytes(b"")
+    before = sorted(p.name for p in root.rglob("*"))
+    listing = client.post("/api/v1/stacks/browse", json={"path": str(root)}).json()
+    by_name = {f["name"]: f for f in listing["folders"]}
+    assert by_name["M 42_sub"]["fits"] == 3 and by_name["M 42_sub"]["is_sub"] and not by_name["M 31"]["is_sub"]
+    assert listing["parent"] == str(tmp_path)
+    assert client.post("/api/v1/stacks/browse", json={"path": str(root / "missing")}).json()["error"]
+    top = client.post("/api/v1/stacks/browse", json={"path": None}).json()
+    assert top["path"] is None and top["folders"]
+    assert sorted(p.name for p in root.rglob("*")) == before
+    assert client.post("/api/v1/stacks/browse", json={"path": str(root)}, headers={"X-EAE-Token": "bad"}).status_code == 403
+
+
+def test_zip_build_can_be_cancelled(client, tmp_path):
+    from app.db import new_id, now
+    from app.services import exports
+
+    arr, _ = synthetic_field(seed=23)
+    a = ready(client, upload(client, write_jpeg(tmp_path / "zip.jpg", arr))["id"])
+    run_id = run_job(client, [a["id"]], default_recipe(client), key="zip-cancel-1")["items"][0]["run_id"]
+    db = client.app.state.db
+    export_id = new_id("zip_")
+    db.insert("exports", {"id": export_id, "state": "building", "created_at": now(), "path": None, "detail": {"done": 0, "total": 1}})
+    assert client.post(f"/api/v1/exports/{export_id}/cancel").json()["cancelling"] is True
+    exports._build(client.cfg, db, export_id, [run_id], ["tiff"])  # the builder stops before writing anything
+    st = client.get(f"/api/v1/exports/{export_id}").json()
+    assert st["state"] == "cancelled" and st["download_url"] is None
+    assert not list(client.cfg.exports_dir.glob(f"{export_id}*"))
+    assert client.post(f"/api/v1/exports/{export_id}/cancel").json()["cancelling"] is False  # nothing left to cancel
+
+
 @pytest.mark.realfiles
 def test_real_jpeg_vertical_slice(client):
     p = real_file("*M 31*.JPG")

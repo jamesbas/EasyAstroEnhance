@@ -20,24 +20,38 @@ def total_radius(n_scales: int) -> int:
     return sum(scale_radius(j) for j in range(1, n_scales + 1))
 
 
+def _taps(xp, src, out, step: int, m: int, weights, tmp=None):
+    """out[r] = sum_k src[r + k*step] * weights[k] for r < m, accumulated in tap order (k = 0..4)."""
+    xp.multiply(src[0:m], weights[0], out=out)
+    tmp = xp.empty_like(out) if tmp is None else tmp
+    for k in range(1, 5):
+        xp.multiply(src[k * step : k * step + m], weights[k], out=tmp)
+        xp.add(out, tmp, out=out)
+    return out
+
+
 def _smooth_axis(xp, a, step: int, axis: int):
+    """One dilated B3 pass with reflect boundaries.
+
+    The interior is computed directly from ``a`` and only the two boundary bands are padded, accumulating the taps in
+    the same order as a full ``pad`` + sum, so results are bitwise identical to that formulation but much cheaper."""
     n = a.shape[axis]
     pad = 2 * step
-    if n <= pad:  # tiny inputs: fall back to edge padding (reflect needs n > pad)
-        mode = "edge"
-    else:
-        mode = "reflect"
-    widths = [(0, 0)] * a.ndim
-    widths[axis] = (pad, pad)
-    p = xp.pad(a, widths, mode=mode)
-    out = None
-    for k, wk in enumerate(B3):
-        off = k * step
-        sl = [slice(None)] * a.ndim
-        sl[axis] = slice(off, off + n)
-        term = p[tuple(sl)] * a.dtype.type(wk)
-        out = term if out is None else out + term
-    return out
+    weights = [a.dtype.type(wk) for wk in B3]
+    src = xp.moveaxis(a, axis, 0)
+    out = xp.empty(src.shape, dtype=a.dtype)
+    if n <= 2 * pad:  # small inputs: pad everything (edge padding when reflect needs n > pad)
+        widths = [(pad, pad)] + [(0, 0)] * (a.ndim - 1)
+        p = xp.pad(src, widths, mode="edge" if n <= pad else "reflect")
+        _taps(xp, p, out, step, n, weights)
+        return xp.moveaxis(out, 0, axis)
+    _taps(xp, src, out[pad : n - pad], step, n - 2 * pad, weights)
+    rest = [(0, 0)] * (a.ndim - 1)
+    head = xp.pad(src[: 2 * pad], [(pad, 0)] + rest, mode="reflect")
+    _taps(xp, head, out[:pad], step, pad, weights)
+    tail = xp.pad(src[n - 2 * pad :], [(0, pad)] + rest, mode="reflect")
+    _taps(xp, tail, out[n - pad :], step, pad, weights)
+    return xp.moveaxis(out, 0, axis)
 
 
 def smooth(xp, a, j: int):

@@ -3,7 +3,7 @@ import type {
   BatchIncludeKind, ComputeInfo, ComputePatchBody, ExportStatus, HistorySummary, Interpretation, Job, JobCreateBody,
   JobCreated, JobList, Preset, PresetList, Recipe, Rect, RunDetail, RunList, Session, StarMaskResult, UploadResult,
   ApiErrorBody, Stack, StackCreateBody, StackFolders, StackList, StackPlan, AIOverview,
-  EditExportBody,
+  EditExportBody, FolderListing, LivePreview, PresetPreviews,
 } from './types';
 
 export const API = '/api/v1';
@@ -168,6 +168,12 @@ export const api = {
   previewBackground: (id: string, body: BackgroundBody) => request<BackgroundPreview>('POST', `/assets/${id}/background/preview`, body),
   confirmBackground: (id: string, body: BackgroundBody) => request<Asset>('PUT', `/assets/${id}/background`, body),
   starMask: (id: string) => request<StarMaskResult>('GET', `/assets/${id}/star-mask`),
+  // live preview of the current settings (never saved) and quick-look preset thumbnails
+  startLivePreview: (id: string, recipe: Recipe) => request<LivePreview>('POST', `/assets/${id}/live-preview`, { recipe }),
+  livePreview: (id: string) => request<LivePreview>('GET', `/assets/${id}/live-preview`),
+  cancelLivePreview: (id: string) => request<{ cancelled: boolean }>('DELETE', `/assets/${id}/live-preview`),
+  presetPreviews: (id: string, items: { id: string; recipe: Recipe }[]) =>
+    request<PresetPreviews>('POST', `/assets/${id}/preset-previews`, { items }),
   // jobs
   createJob: (body: JobCreateBody) => request<JobCreated>('POST', '/jobs', body),
   listJobs: (active: boolean) => request<JobList>('GET', `/jobs${active ? '?active=true' : ''}`),
@@ -180,6 +186,7 @@ export const api = {
   deleteAI: (key: string) => request<AIOverview>('DELETE', `/ai/models/${key}`),
   // stacking (folders are read, never written)
   scanStack: (body: StackFolders) => request<StackPlan>('POST', '/stacks/scan', body),
+  browseFolders: (path: string | null) => request<FolderListing>('POST', '/stacks/browse', { path }),
   createStack: (body: StackCreateBody) => request<Stack>('POST', '/stacks', body),
   listStacks: (active: boolean) => request<StackList>('GET', `/stacks${active ? '?active=true' : ''}`),
   getStack: (id: string) => request<Stack>('GET', `/stacks/${id}`),
@@ -202,11 +209,12 @@ export const api = {
   probeCompute: () => request<ComputeInfo>('POST', '/compute/probe'),
   patchCompute: (body: ComputePatchBody) => request<ComputeInfo>('PATCH', '/settings/compute', body),
   getSettings: () => request<AppSettings>('GET', '/settings'),
-  patchSettings: (body: { strip_location: boolean }) => request<AppSettings>('PATCH', '/settings', body),
+  patchSettings: (body: { strip_location?: boolean; keep_runs_per_image?: number }) => request<AppSettings>('PATCH', '/settings', body),
   // exports / history
   startBatchExport: (runIds: string[], include: BatchIncludeKind[]) =>
     request<BatchExportStarted>('POST', '/exports/batch', { run_ids: runIds, include }),
   getExport: (id: string) => request<ExportStatus>('GET', `/exports/${id}`),
+  cancelExport: (id: string) => request<{ id: string; cancelling: boolean }>('POST', `/exports/${id}/cancel`),
   historySummary: () => request<HistorySummary>('GET', '/history/summary'),
   clearHistory: () => request<{ cleared: boolean }>('DELETE', '/history', { confirm: true }),
 };

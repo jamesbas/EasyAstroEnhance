@@ -25,6 +25,8 @@ interface CompareViewerProps {
   fixedMapping: boolean;
   onFixedMapping: (v: boolean) => void;
   starOverlayUrl: string | null;
+  // A ready live preview of the current (unsaved) settings is shown instead of the selected run's result.
+  live?: { url: string; hasFixed: boolean } | null;
 }
 
 type Gesture =
@@ -89,10 +91,14 @@ export function CompareViewer(props: CompareViewerProps) {
   const tileRect = useMemo(() => rawTile, [tileKey]);
 
   const baseOriginal = asset.preview_url ? assetImageUrl(asset, asset.preview_url) : '';
-  const fixedVariant = props.fixedMapping && props.hasFixedMapping;
-  const baseEnhanced = run ? (fixedVariant ? withQuery(run.preview_url, { variant: 'fixed' }) : run.preview_url) : '';
+  const live = props.live ?? null;
+  const enhancedUrl = live ? live.url : run?.preview_url ?? '';
+  const hasFixed = live ? live.hasFixed : props.hasFixedMapping;
+  const fixedVariant = props.fixedMapping && hasFixed;
+  const baseEnhanced = run ? (fixedVariant ? withQuery(enhancedUrl, { variant: 'fixed' }) : enhancedUrl) : '';
   const tileOriginal = tileRect && baseOriginal ? withRoi(baseOriginal, tileRect) : null;
-  const tileEnhanced = tileRect && run ? withRoi(run.preview_url, tileRect, fixedVariant ? { variant: 'fixed' } : undefined) : null;
+  const tileEnhanced = tileRect && run ? withRoi(enhancedUrl, tileRect, fixedVariant ? { variant: 'fixed' } : undefined) : null;
+  const enhancedLabel = live ? 'Live preview (not saved)' : 'Enhanced';
 
   const originalLabel = asset.baseline?.label ?? 'Original view';
   const downsampled = nativeScale < 0.999;
@@ -248,7 +254,7 @@ export function CompareViewer(props: CompareViewerProps) {
       }
       onBaseError={side === 'original' ? () => setFailed(true) : undefined}
     >
-      {side === 'enhanced' && props.showClipping && run && (
+      {side === 'enhanced' && props.showClipping && run && !live && (
         <img className="stage-overlay" src={clippingOverlayUrl(run.id)} alt="" draggable={false} style={{ width: imgW, height: imgH }} />
       )}
       {props.starOverlayUrl && <img className="stage-overlay" src={props.starOverlayUrl} alt="" draggable={false} style={{ width: imgW, height: imgH }} />}
@@ -289,7 +295,7 @@ export function CompareViewer(props: CompareViewerProps) {
         onAutoBlink={setAutoBlink}
         showClipping={props.showClipping}
         onShowClipping={props.onShowClipping}
-        fixedAvailable={props.hasFixedMapping && canCompare}
+        fixedAvailable={hasFixed && canCompare}
         fixedMapping={props.fixedMapping}
         onFixedMapping={props.onFixedMapping}
       />
@@ -303,8 +309,8 @@ export function CompareViewer(props: CompareViewerProps) {
           <button type="button" className="btn small" onClick={props.onToolDone}>Done drawing</button>
         </div>
       )}
-      {props.fixedMapping && props.hasFixedMapping && comparing && (
-        <div className="viewer-banner diag" role="status">Diagnostic: processed data shown with the original frozen display mapping</div>
+      {props.fixedMapping && hasFixed && comparing && (
+        <div className="viewer-banner diag" role="status">Diagnostic: the processed data shown with the original image's frozen display stretch</div>
       )}
       <div
         ref={bodyRef}
@@ -340,9 +346,9 @@ export function CompareViewer(props: CompareViewerProps) {
           {failed && <div className="viewer-msg err">The preview could not be loaded.</div>}
           {!asset.preview_url && <div className="viewer-msg">No preview yet.</div>}
           <span className="chip-label left" data-testid="label-original">
-            {blinkMode ? (blinkSide === 'enhanced' ? 'Enhanced' : originalLabel) : originalLabel}
+            {blinkMode ? (blinkSide === 'enhanced' ? enhancedLabel : originalLabel) : originalLabel}
           </span>
-          {dividerMode && <span className="chip-label right" data-testid="label-enhanced">Enhanced</span>}
+          {dividerMode && <span className={`chip-label right${live ? ' live' : ''}`} data-testid="label-enhanced">{enhancedLabel}</span>}
           {dividerMode && (
             <div className="divider" style={{ left: `${pct}%` }}>
               <div
@@ -373,7 +379,7 @@ export function CompareViewer(props: CompareViewerProps) {
         {showSecondPane && (
           <div className="pane">
             <div className="layer">{renderStage('enhanced')}</div>
-            <span className="chip-label left">Enhanced</span>
+            <span className={`chip-label left${live ? ' live' : ''}`}>{enhancedLabel}</span>
           </div>
         )}
       </div>

@@ -30,6 +30,31 @@ _SENSITIVE_KEYS = (
 SENSITIVE_KEYS = frozenset(_SENSITIVE_KEYS)
 
 
+def _evidence(header: Any) -> dict[str, Any]:
+    """Header facts that can support a *recommended* intake answer (the user still confirms it)."""
+    def text(key: str) -> str | None:
+        v = header.get(key)
+        return str(v).strip()[:60] if v not in (None, "") else None
+
+    def count(key: str) -> int | None:
+        try:
+            v = header.get(key)
+            return int(v) if v not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    seestar = is_seestar(header)
+    return {k: v for k, v in {
+        "instrument": text("INSTRUME") or text("TELESCOP") or text("CREATOR"),
+        "seestar": seestar or None,
+        "stack_count": count("STACKCNT") if count("STACKCNT") is not None else count("NCOMBINE"),
+        "bayer_pattern": text("BAYERPAT"),
+        "eae_kind": text("EAEKIND"),
+        "eae_stack": text("EAESTACK"),
+        "eae_mix": text("EAEMIX"),
+    }.items() if v is not None}
+
+
 def _classify(hdu_index: int, hdu: Any) -> dict[str, Any] | None:
     if not isinstance(hdu, (fits.PrimaryHDU, fits.ImageHDU, fits.CompImageHDU)):
         return None
@@ -54,6 +79,7 @@ def _classify(hdu_index: int, hdu: Any) -> dict[str, Any] | None:
         "message": "",
     }
     bayer = header.get("BAYERPAT") or header.get("CFA") or header.get("COLORTYP")
+    cand["evidence"] = _evidence(header)
     if len(squeezed) == 2:
         if bayer:
             cand.update(

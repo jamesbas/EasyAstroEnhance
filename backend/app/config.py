@@ -26,6 +26,7 @@ class Config:
     gpu_threshold_pixels: int = 2_000_000
     min_free_bytes: int = 256 * 1024 * 1024
     cpu_only: bool = False
+    cpu_threads: int = 0  # 0 = automatic (up to 8 threads for CPU pixel work and analysis)
 
     @property
     def db_path(self) -> Path:
@@ -81,6 +82,7 @@ def load_config(**overrides) -> Config:
         dev_origins=dev,
         gpu_threshold_pixels=int(env.get("EASYASTRO_GPU_THRESHOLD_PIXELS", 2_000_000)),
         cpu_only=env.get("EASYASTRO_CPU_ONLY") == "1",
+        cpu_threads=max(0, int(env.get("EASYASTRO_CPU_THREADS", 0) or 0)),
     )
     return replace(cfg, **overrides) if overrides else cfg
 

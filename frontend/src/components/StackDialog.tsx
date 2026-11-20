@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, readableError } from '../api/client';
 import type { Recipe, Stack, StackGrading, StackPlan } from '../api/types';
+import { FolderBrowser } from './FolderBrowser';
 import { Modal } from './Modal';
 
 const FOLDER_KEY = 'eae.stack.folder';
@@ -75,29 +76,30 @@ export function StackDialog({ recipe, settingsLabel, presetId, onClose, onStarte
   const [grading, setGrading] = useState<StackGrading>('standard');
   const [rejection, setRejection] = useState(true);
   const [autoEnhance, setAutoEnhance] = useState(false);
+  const [browsing, setBrowsing] = useState(false);
 
   // Any change to the folders makes the summary stale.
   useEffect(() => {
     setPlan(null);
   }, [folder, cal]);
 
-  const folders = () => ({
-    folder: folder.trim(),
+  const folders = (f: string = folder) => ({
+    folder: f.trim(),
     darks: cal.darks.trim() || null,
     flats: cal.flats.trim() || null,
     bias: cal.bias.trim() || null,
     darkflats: cal.darkflats.trim() || null,
   });
 
-  const scan = async () => {
-    if (!folder.trim()) return;
+  const scan = async (f: string = folder) => {
+    if (!f.trim()) return;
     setScanning(true);
     setError(null);
     try {
-      const p = await api.scanStack(folders());
+      const p = await api.scanStack(folders(f));
       setPlan(p);
       if (!p.drizzle_available) setScale(1);
-      localStorage.setItem(FOLDER_KEY, folder.trim());
+      localStorage.setItem(FOLDER_KEY, f.trim());
     } catch (err) {
       setError(readableError(err));
     } finally {
@@ -150,11 +152,16 @@ export function StackDialog({ recipe, settingsLabel, presetId, onClose, onStarte
             onChange={(e) => setFolder(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') void scan(); }}
           />
+          <button type="button" className="btn" disabled={scanning} onClick={() => setBrowsing((b) => !b)} data-testid="stack-browse">Browse…</button>
           <button type="button" className="btn" disabled={!folder.trim() || scanning} onClick={() => void scan()} data-testid="stack-scan">
             {scanning ? 'Scanning…' : 'Scan folder'}
           </button>
         </div>
-        <p className="muted small">Paste the full path (in File Explorer: right-click the folder → Copy as path).</p>
+        <p className="muted small">Browse to the folder, or paste the full path (in File Explorer: right-click the folder → Copy as path).</p>
+        {browsing && (
+          <FolderBrowser start={folder || null} onClose={() => setBrowsing(false)}
+            onPick={(p) => { setBrowsing(false); setFolder(p); void scan(p); }} />
+        )}
       </div>
 
       <details className="manage">

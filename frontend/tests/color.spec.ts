@@ -1,13 +1,13 @@
 import { expect, test } from '@playwright/test';
 import path from 'node:path';
-import { resetBackend } from './helpers';
+import { resetBackend, showAllControls } from './helpers';
 
 const dir = process.env.EAE_COLOR_DIR;
 
 test.describe('optional color workflow', () => {
   test.skip(!dir, 'The browser runner prepares the synthetic color fixtures.');
 
-  test.beforeEach(async ({ request }) => { await resetBackend(request); });
+  test.beforeEach(async ({ page, request }) => { await resetBackend(request); await showAllControls(page); });
 
   test('preview a hue mask, import a local catalog, and enhance with manual focus', async ({ page }) => {
     await page.goto('/');

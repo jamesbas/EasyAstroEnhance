@@ -20,6 +20,7 @@ No module here touches HTTP, the database or the UI.
 """
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +29,7 @@ from typing import Any, Callable
 import numpy as np
 
 from . import background as bgmod
+from . import cosmetic
 from . import finishing as fin
 from . import linear_prep as lp
 from .ai import registry as ai_registry
@@ -43,6 +45,7 @@ from .diagnostics import clip_report, merge_clip_counts
 from .imagedata import Cancelled, ImageData, ProcessingError
 from .masks import masked_gaussian, region_summary, regions_mask, validate_regions
 from .object_color import hubble_input, hubble_style, selective_color
+from .parallel import Background, rowwise
 from .recipe import (
     BACKGROUND_STRENGTH, PIPELINE_VERSION, POP_PER_CONTRAST, RENDERED_BASE_GAIN, SATURATION_PER_COLOR,
     STRETCH_DECADES_PER_UNIT, ObjectColorRecipe, Recipe,
@@ -53,7 +56,7 @@ from .stretch import (
     LinearFrame, StretchParams, apply_stretch, derive_frame, derive_normalization, fixed_map, from_normalized, mtf,
     rendered_sky_balance, solve_focus, solve_stretch, stretch_statistics, to_normalized,
 )
-from .tiling import run_tiled
+from .tiling import parallel_tiles, run_tiled
 from .tone import ManualTone, apply_manual, rational_gain, smoothstep, validate_monotonic
 
 CLIP_THRESHOLD_BLACK = 0.001
@@ -66,7 +69,16 @@ DEFAULT_STAR_STRETCH = 0.5
 DEFAULT_HDR_AMOUNT = 0.5
 DEFAULT_SCNR_AMOUNT = 1.0
 DEFAULT_GRADIENT_DEGREE = 2
+DEFAULT_FRINGE_AMOUNT = fin.DEFAULT_FRINGE_AMOUNT
 COLD_SIGMAS = 8.0
+DEFAULT_CPU_THREADS = 8  # measured: memory bandwidth limits gains beyond this on the target PC
+MIN_PARALLEL_PIXELS = 1_000_000  # below this, one full-frame tile is faster than splitting with halos
+
+
+def cpu_threads(opts: "ExecutionOptions") -> int:
+    if opts.cpu_threads is not None:
+        return max(1, int(opts.cpu_threads))
+    return max(1, min(os.cpu_count() or 1, DEFAULT_CPU_THREADS))
 
 
 @dataclass
@@ -88,6 +100,7 @@ class ExecutionOptions:
     ram_budget_bytes: int | None = None
     gpu_threshold_pixels: int = 2_000_000
     force_tile: int | None = None
+    cpu_threads: int | None = None  # None: min(logical CPUs, DEFAULT_CPU_THREADS); 1 disables threaded tiles
     cancel_check: Callable[[], None] | None = None
     progress: Callable[[str], None] | None = None
     backend_factory: Callable[[str], Backend] | None = None
@@ -131,11 +144,12 @@ class GroupA:
 
     @property
     def halo(self) -> int:
+        # Chained stages: deconvolution feeds the denoise, so their footprints add up.
         h = 0
-        if self.denoise:
-            h = max(h, self.denoise.halo)
         if self.deconv:
-            h = max(h, self.deconv.halo)
+            h += self.deconv.halo
+        if self.denoise:
+            h += self.denoise.halo
         return h
 
 
@@ -165,25 +179,29 @@ class GroupB:
     hubble_sigma: float = 0.0
     separated: bool = False  # AI star separation: x is the starless image, "full" the image with stars
     star_brightness: float = 1.0
+    star_color: float = 0.0
+    fringe_amount: float = 0.0  # star-fringe reduction inside the "fringe" ring input
 
     @property
     def tail_needed(self) -> bool:
         return bool(
             self.tone_enabled or not self.manual.neutral or self.detail is not None or self.saturation > 1.0
             or self.hdr_amount > 0 or self.pop_a > 0 or self.scnr_amount > 0 or self.star_amount > 0
-            or self.object_color is not None or self.hubble_strength > 0
+            or self.object_color is not None or self.hubble_strength > 0 or self.star_color > 0
         )
 
     @property
     def halo(self) -> int:
-        h = kernel_radius(HALO_SIGMA) + 2
-        if self.detail:
-            h = max(h, self.detail.halo)
-        if self.hdr_amount > 0:
-            h = max(h, fin.halo(0, True))
-        if self.mode == "rendered" and self.star_amount > 0:
-            h = max(h, 2 * kernel_radius(HALO_SIGMA) + 2)
-        return h
+        # Spatial stages run in sequence (rendered star protection -> HDR -> detail), so their footprints add up; the
+        # remaining stages are per-pixel.
+        h = 2
+        if self.mode == "rendered" and self.tone_enabled and self.star_amount > 0:
+            h += kernel_radius(HALO_SIGMA)
+        if self.tail_needed and self.hdr_amount > 0:
+            h += kernel_radius(fin.HDR_SIGMA)
+        if self.tail_needed and self.detail:
+            h += self.detail.halo
+        return max(h, kernel_radius(HALO_SIGMA) + 2)
 
 
 # ====================================================================================================== helpers
@@ -228,6 +246,9 @@ class _Timings:
         out = fn()
         self.items.append({"stage": name, "backend": backend, "seconds": round(time.perf_counter() - t0, 4), **extra})
         return out
+
+    def add(self, name: str, backend: str, seconds: float, **extra) -> None:
+        self.items.append({"stage": name, "backend": backend, "seconds": round(seconds, 4), **{k: v for k, v in extra.items() if v is not None}})
 
 
 def _lum_stretch(xp, x):
@@ -333,6 +354,8 @@ def _group_b(be: Backend, tile_in: dict[str, np.ndarray], inner: tuple[int, int,
                 y = fin.scnr(xp, y, P.scnr_amount)
             y = gamut_fit(xp, y)
             y = fin.protected_saturate(xp, y, P.saturation, P.sky_disp, P.sky_sd)
+            if P.star_color > 0 and not P.separated:
+                y = fin.star_color(xp, y, star, P.star_color)
             if P.object_color is not None:
                 y, _ = selective_color(xp, y, star, w, P.sky_disp, P.sky_sd, P.object_color, P.object_scale)
             if P.hubble_strength > 0:
@@ -342,7 +365,11 @@ def _group_b(be: Backend, tile_in: dict[str, np.ndarray], inner: tuple[int, int,
     if stars_disp is not None:  # stars added back over the finished starless image
         if P.star_brightness < 1.0:
             stars_disp *= P.star_brightness
+        if P.star_color > 0 and rgb:
+            stars_disp = xp.maximum(fin.star_color(xp, stars_disp, 1.0, P.star_color), 0.0)
         y = xp.clip(y + stars_disp, 0.0, 1.0)
+    if P.fringe_amount > 0 and rgb:
+        y = fin.fringe_reduce(xp, y, be.asarray(tile_in["fringe"]), P.fringe_amount)
 
     sl = (slice(iy0, iy1), slice(ix0, ix1))
     eligible = w[sl] > 0
@@ -355,14 +382,227 @@ def _group_b(be: Backend, tile_in: dict[str, np.ndarray], inner: tuple[int, int,
 
 
 # ====================================================================================================== main
-def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: ExecutionOptions | None = None) -> PipelineResult:
-    opts = opts or ExecutionOptions()
+@dataclass(frozen=True)
+class _Flags:
+    """Recipe-derived switches shared by both stages (some depend on display-only fields)."""
+
+    manual: ManualTone
+    tone_stage: bool
+    narrowband: bool
+    filter_kind: str | None
+    hubble_ready: bool
+    catalog_eligible: bool
+    is_noop: bool
+    need_star: bool
+    dualband: bool  # linear RGB taken through a recognized (or confirmed) H-alpha/OIII dual-band filter
+
+
+def _flags(image: ImageData, recipe: Recipe, ctx: AssetContext) -> _Flags:
+    mode = "linear" if image.domain == "linear" else "rendered"
+    rgb = image.channels == 3
+    look, auto, adv = recipe.look, recipe.auto, recipe.advanced
+    manual = ManualTone(recipe.tone.brightness_ev, recipe.tone.shadows, recipe.tone.highlights, recipe.tone.black_point)
+    validate_monotonic(manual)
+    tone_stage = recipe.tone.enabled or not manual.neutral
+    palette = image.header.get("EAEMIX") if image.header is not None else None
+    narrowband = palette in ("HOO", "SHO", "DUAL-SHO", "HA-RGB")
+    filter_kind = hubble_input(image.header, ctx.dualband_confirmed)
+    hubble_ready = bool(recipe.hubble_strength and filter_kind == "dualband" and mode == "linear" and rgb and image.source_format == "fits")
+    dualband = bool(filter_kind == "dualband" and mode == "linear" and rgb and not narrowband)
+    catalog_eligible = not narrowband and filter_kind not in ("dualband", "unsupported")
+    color_ops = rgb and (look.color > 0 or auto.green_removal or recipe.object_color.active
+                         or hubble_ready
+                         or ((auto.white_balance or recipe.catalog_sha256) and mode == "linear"))
+    is_noop = not (
+        tone_stage or look.noise > 0 or look.contrast > 0 or look.detail > 0 or color_ops or recipe.background.enabled
+        or auto.neutralize or (auto.gradient and mode == "linear") or adv.deconvolution
+        or (look.protect_cores and recipe.tone.enabled) or recipe.ai.background or recipe.ai.denoise or recipe.ai.stars
+        or (auto.cosmetic and mode == "linear")
+    )
+    need_star = not is_noop and (look.noise > 0 or look.detail > 0 or auto.star_stretch or auto.white_balance
+                                or adv.deconvolution or auto.gradient or recipe.object_color.active or bool(recipe.catalog_sha256)
+                                or hubble_ready or look.star_color > 0 or auto.halo_reduction)
+    return _Flags(manual, tone_stage, narrowband, filter_kind, hubble_ready, catalog_eligible, is_noop, need_star, dualband)
+
+
+def _progress_fns(opts: ExecutionOptions):
     check = opts.cancel_check or (lambda: None)
 
     def progress(msg: str) -> None:
         check()
         if opts.progress:
             opts.progress(msg)
+
+    return check, progress
+
+
+@dataclass
+class LinearStage:
+    """Everything the display stage needs from the measurement and linear clean-up (the expensive part). It depends only
+    on the source, the per-image context and the stage-1 recipe fields (see ``stage_key``), so it can be reused while
+    only display settings change. Arrays in it are never modified afterwards."""
+
+    image: ImageData
+    frame: LinearFrame | None
+    baseline: np.ndarray
+    regions: list[dict[str, int]]
+    protected: np.ndarray
+    weight: np.ndarray
+    edge_info: dict[str, Any]
+    stat_w: np.ndarray
+    star: StarMask | None
+    noise: dict[str, float]
+    bg_status: dict[str, Any]
+    bg_model: Any
+    bg_strength: float
+    ai: dict[str, dict[str, Any]]
+    grad_status: dict[str, Any]
+    grad_model: Any
+    sky: Any
+    neutral_status: dict[str, Any]
+    wb: Any
+    wb_status: dict[str, Any]
+    catalog: dict[str, Any]
+    A: GroupA
+    deconv_status: dict[str, Any]
+    decisions: dict[str, Any]
+    proc: np.ndarray
+    proc_changed: bool
+    disp_src: np.ndarray
+    sig_before_ai: float | None
+    backend_name: str
+    backend_reason: str
+    gpu_disabled: bool
+    exec_info: dict[str, Any]
+    star_in: np.ndarray
+    timings: list[dict[str, Any]]
+    seconds: float
+    cosmetic_status: dict[str, Any] = field(default_factory=lambda: {"status": "off", "reason": None})
+    edges: np.ndarray | None = None
+
+    @property
+    def star_hard(self) -> np.ndarray | None:
+        return self.star.hard if self.star and self.star.reliable else None
+
+    @property
+    def star_soft(self) -> np.ndarray | None:
+        return self.star.soft if self.star and self.star.reliable else None
+
+    @property
+    def nbytes(self) -> int:
+        arrays = [self.baseline, self.protected, self.weight, self.stat_w, self.proc, self.star_in, self.image.pixels, self.image.valid_mask]
+        if self.disp_src is not self.proc:
+            arrays.append(self.disp_src)
+        if self.star is not None:
+            arrays += [a for a in (self.star.soft, self.star.hard) if a is not None]
+        return int(sum(a.nbytes for a in arrays))
+
+
+STAGE_RECIPE_FIELDS = {
+    "protect_regions": None,
+    "background": None,
+    "auto": ("neutralize", "gradient", "white_balance", "cosmetic"),
+    "look": ("noise",),
+    "advanced": ("gradient_degree", "white_balance_limit", "deconvolution", "deconvolution_iterations", "denoise_scales", "background_strength"),
+    "ai": ("background", "denoise", "stars"),
+    "catalog_sha256": None,
+}
+
+
+def stage_key(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: ExecutionOptions) -> str:
+    """Identity of the linear stage: source, per-image context, the recipe fields that stage reads, the switches derived
+    from display fields that change what it measures, the planned backend and the AI model files available."""
+    import hashlib
+    import json
+
+    f = _flags(image, recipe, ctx)
+    dumped = recipe.model_dump()
+    subset: dict[str, Any] = {}
+    for name, keys in STAGE_RECIPE_FIELDS.items():
+        subset[name] = dumped[name] if keys is None else {k: dumped[name][k] for k in keys}
+    ai_files = []
+    if recipe.ai.background or recipe.ai.denoise or recipe.ai.stars:
+        for tool in ("background", "denoise", "stars"):
+            spec, path, _ = _ai_model(opts, tool, image.channels == 3)
+            ai_files.append([tool, str(path) if path else None])
+    ident = {
+        "engine": PIPELINE_VERSION, "source": image.source_hash, "domain": image.domain, "shape": list(image.pixels.shape),
+        "dtype": str(image.pixels.dtype), "regions": ctx.regions if recipe.protect_regions else [], "background": ctx.background,
+        "frame": ctx.frame, "dualband": ctx.dualband_confirmed, "recipe": subset, "is_noop": f.is_noop, "need_star": f.need_star,
+        "filter_kind": f.filter_kind, "backend": choose_backend(opts, image.height, image.width, image.channels)[0],
+        "device": opts.device, "gpu_disabled": opts.gpu_disabled, "ai_files": ai_files,
+    }
+    return hashlib.sha256(json.dumps(ident, sort_keys=True, default=str).encode()).hexdigest()
+
+
+class StageCache:
+    """A small in-memory LRU of linear stages (bounded by count and bytes); held by the worker process."""
+
+    def __init__(self, max_entries: int = 2, max_bytes: int | None = None) -> None:
+        from collections import OrderedDict
+
+        self.max_entries, self.max_bytes = max_entries, max_bytes
+        self._items: "OrderedDict[str, LinearStage]" = OrderedDict()
+
+    def get(self, key: str) -> LinearStage | None:
+        st = self._items.get(key)
+        if st is not None:
+            self._items.move_to_end(key)
+        return st
+
+    def put(self, key: str, stage: LinearStage) -> None:
+        if self.max_entries <= 0 or (self.max_bytes is not None and stage.nbytes > self.max_bytes):
+            return
+        self._items[key] = stage
+        self._items.move_to_end(key)
+        while len(self._items) > self.max_entries or (
+            self.max_bytes is not None and sum(s.nbytes for s in self._items.values()) > self.max_bytes and len(self._items) > 1
+        ):
+            self._items.popitem(last=False)
+
+    def clear(self) -> None:
+        self._items.clear()
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+
+def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: ExecutionOptions | None = None,
+                 cache: StageCache | None = None) -> PipelineResult:
+    """Enhance one image. With ``cache``, a linear stage computed earlier for the same stage-1 inputs is reused, so a change
+    of display settings only reruns the display stage; the result is identical to a fresh run. An Auto recipe is first
+    resolved to the built-in preset its measurements choose."""
+    from .auto_preset import resolve
+
+    opts = opts or ExecutionOptions()
+    t0 = time.perf_counter()
+    recipe, auto_info = resolve(image, recipe)
+    auto_seconds = time.perf_counter() - t0
+    key = stage_key(image, recipe, ctx, opts) if cache is not None else None
+    stage = cache.get(key) if cache is not None and key else None
+    reused = stage is not None
+    if stage is None:
+        stage = prepare_linear_stage(image, recipe, ctx, opts)
+        if cache is not None and key and not stage.gpu_disabled and not stage.exec_info.get("fallbacks"):
+            cache.put(key, stage)
+    result = finish_display(stage, recipe, ctx, opts, reused=reused)
+    if auto_info is not None:
+        result.report["auto_preset"] = auto_info
+        result.report["stage_timings"].insert(0, {"stage": "auto preset", "backend": "cpu", "seconds": round(auto_seconds, 4)})
+        result.report["summary"] = f"Auto: {auto_info['label']} · {result.report['summary']}"
+        result.summary = result.report["summary"]
+    if cache is not None:
+        result.report["linear_stage_cache"] = {
+            "reused": reused, "key": key[:16] if key else None,
+            "note": "The measurements and linear clean-up were reused from an earlier run with the same image and linear "
+                    "settings; only display settings changed." if reused else "Computed for this run.",
+        }
+    return result
+
+
+def prepare_linear_stage(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: ExecutionOptions | None = None) -> LinearStage:
+    opts = opts or ExecutionOptions()
+    check, progress = _progress_fns(opts)
 
     timings = _Timings()
     t_start = time.perf_counter()
@@ -393,22 +633,24 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
         work = image.pixels.astype(np.float32, copy=False)
     baseline = baseline_display(image, frame)
 
-    manual = ManualTone(recipe.tone.brightness_ev, recipe.tone.shadows, recipe.tone.highlights, recipe.tone.black_point)
-    validate_monotonic(manual)
-    tone_stage = recipe.tone.enabled or not manual.neutral
-    palette = image.header.get("EAEMIX") if image.header is not None else None
-    narrowband = palette in ("HOO", "SHO", "DUAL-SHO", "HA-RGB")
-    filter_kind = hubble_input(image.header, ctx.dualband_confirmed) if recipe.hubble_strength or recipe.catalog_sha256 else None
-    hubble_ready = bool(filter_kind == "dualband" and mode == "linear" and rgb and image.source_format == "fits")
-    catalog_eligible = not narrowband and filter_kind not in ("dualband", "unsupported")
-    color_ops = rgb and (look.color > 0 or auto.green_removal or recipe.object_color.active
-                         or hubble_ready
-                         or ((auto.white_balance or recipe.catalog_sha256) and mode == "linear"))
-    is_noop = not (
-        tone_stage or look.noise > 0 or look.contrast > 0 or look.detail > 0 or color_ops or recipe.background.enabled
-        or auto.neutralize or (auto.gradient and mode == "linear") or adv.deconvolution
-        or (look.protect_cores and recipe.tone.enabled) or recipe.ai.background or recipe.ai.denoise or recipe.ai.stars
-    )
+    flags = _flags(image, recipe, ctx)
+    narrowband, filter_kind, hubble_ready, catalog_eligible, is_noop, dualband = (
+        flags.narrowband, flags.filter_kind, flags.hubble_ready, flags.catalog_eligible, flags.is_noop, flags.dualband)
+
+    # ---------------------------------------------------------------- cosmetic correction (linear stacks)
+    threads = cpu_threads(opts)
+    cosmetic_status: dict[str, Any] = {"status": "off", "reason": None}
+    cosmetic_changed = False
+    if auto.cosmetic and not is_noop:
+        if mode != "linear":
+            cosmetic_status = {"status": "inactive", "reason": "Cosmetic correction runs on linear stacks only; this image is already processed."}
+        else:
+            progress("Repairing defective pixels")
+            work, cos_info = timings.run("cosmetic correction", "cpu", lambda: cosmetic.correct(work, weight, threads))
+            cosmetic_changed = cos_info["values_repaired"] > 0
+            cosmetic_status = {"status": "applied" if cosmetic_changed else "skipped",
+                               "reason": None if cosmetic_changed else "No isolated colored hot pixels or cold pixels were found.",
+                               "parameters": cos_info}
 
     # ---------------------------------------------------------------- analysis (CPU, global, once)
     edges = np.zeros((h, w), bool)
@@ -420,18 +662,32 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
         stat_w = weight
 
     star: StarMask | None = None
-    need_star = not is_noop and (look.noise > 0 or look.detail > 0 or auto.star_stretch or auto.white_balance
-                                or adv.deconvolution or auto.gradient or recipe.object_color.active or recipe.catalog_sha256
-                                or hubble_ready)
+    need_star = flags.need_star
     if need_star:
         progress("Finding stars")
         star = timings.run("star detection", "cpu", lambda: detect_stars(work, stat_w, STAT_FLOOR), note="global connected components")
     star_hard = star.hard if star and star.reliable else None
     star_soft = star.soft if star and star.reliable else None
 
-    noise_report: dict[str, float] = {}
+    # The global noise estimate is needed only for a supervised background model and the report, so it runs on a helper
+    # thread while the gradient and color analysis continue (same values as running it here).
+    noise_box: dict[str, float] = {}
+    noise_job: Background | None = None
     if not is_noop:
-        noise_report = timings.run("noise estimate", "cpu", lambda: estimate_noise(work, stat_w, star_hard, STAT_FLOOR))
+        def _noise() -> tuple[dict[str, float], float]:
+            t0 = time.perf_counter()
+            return estimate_noise(work, stat_w, star_hard, STAT_FLOOR), time.perf_counter() - t0
+
+        noise_job = Background(_noise, enabled=threads > 1)
+
+    def noise_report() -> dict[str, float]:
+        nonlocal noise_job
+        if noise_job is not None:
+            r, secs = noise_job.result()
+            noise_job = None
+            noise_box.update(r)
+            timings.add("noise estimate", "cpu", secs, note="overlapped with the gradient and color analysis" if threads > 1 else None)
+        return noise_box
 
     # supervised background model
     bg_model: bgmod.BgModel | None = None
@@ -444,7 +700,7 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
         elif conf.get("method") != recipe.background.method:
             bg_status.update(status="skipped", reason=f"Confirmed sky regions are for the '{conf.get('method')}' model, not '{recipe.background.method}'; confirm the new model first.")
         else:
-            sigma_pix = noise_report.get("sigma_white_equivalent") or estimate_noise(work, weight, star_hard, STAT_FLOOR)["sigma_white_equivalent"]
+            sigma_pix = noise_report().get("sigma_white_equivalent") or estimate_noise(work, weight, star_hard, STAT_FLOOR)["sigma_white_equivalent"]
             model = timings.run(
                 "background model", "cpu",
                 lambda: bgmod.build_model(work, weight, star_hard, conf["samples"], recipe.background.method, sigma_pix, protected),
@@ -494,7 +750,7 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
             grad_status = {"status": "skipped", "reason": "A confirmed manual background correction is used for this image."}
         else:
             progress("Modelling gradients")
-            pre_sky = lp.sky_stats(base, stat_w)
+            pre_sky = timings.run("sky statistics (gradient check)", "cpu", lambda: lp.sky_stats(base, stat_w, threads))
             sig_pix = float(np.mean(pre_sky.sigma))
             grad_model = timings.run(
                 "gradient model", "cpu",
@@ -511,7 +767,7 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
         grad_status = {"status": "inactive", "reason": "Automatic gradient removal runs on linear stacks only; this image is already processed."}
 
     # neutralization and white balance
-    sky = lp.sky_stats(base, stat_w) if not is_noop else None
+    sky = timings.run("sky statistics", "cpu", lambda: lp.sky_stats(base, stat_w, threads)) if not is_noop else None
     neutral_status: dict[str, Any] = {"status": "off", "reason": None}
     wb = lp.WhiteBalance(False, reason=None)
     wb_status: dict[str, Any] = {"status": "off", "reason": None}
@@ -539,7 +795,7 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
                 if catalog["status"] == "applied":
                     A.gains = np.asarray(catalog["gains_rgb"], dtype=np.float32)
                     wb_status = {"status": "inactive", "reason": "Replaced by offline catalog calibration."}
-            if rgb and not narrowband and auto.white_balance and catalog["status"] != "applied":
+            if rgb and not narrowband and not dualband and auto.white_balance and catalog["status"] != "applied":
                 wb = timings.run(
                     "white balance", "cpu",
                     lambda: lp.star_white_balance(base - A.sky, star_hard, saturated, sig_l, adv.white_balance_limit or lp.WB_DEFAULT_LIMIT),
@@ -558,8 +814,11 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
         else:
             neutral_status = {"status": "skipped", "reason": "Monochrome image: there is no color cast to neutralize."}
     if rgb and auto.white_balance and mode == "linear" and wb_status["status"] == "off" and not is_noop:
-        wb_status = {"status": "skipped", "reason": "Preserving the selected narrowband palette." if narrowband else
-                     "White balance needs background neutralization, which is switched off."}
+        wb_status = {"status": "skipped", "reason": (
+            "Preserving the selected narrowband palette." if narrowband else
+            "Stars are not white through a dual-band (H-alpha/OIII) filter, so star-based white balance would suppress "
+            "H-alpha; skipped. The sky is still neutralized." if dualband else
+            "White balance needs background neutralization, which is switched off.")}
     elif rgb and auto.white_balance and mode == "rendered" and not is_noop:
         wb_status = {"status": "inactive", "reason": "Star-based white balance runs on linear stacks only; this image is already processed."}
 
@@ -584,13 +843,16 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
     if look.noise > 0:
         progress("Measuring noise")
         n_lum = adv.denoise_scales or 4
-        wn = timings.run("wavelet noise", "cpu", lambda: estimate_wavelet_noise(prepped, stat_w, star_hard, n_lum, min(6, n_lum + 1), STAT_FLOOR))
+        wn = timings.run("wavelet noise", "cpu", lambda: estimate_wavelet_noise(prepped, stat_w, star_hard, n_lum, min(6, n_lum + 1), STAT_FLOOR, threads))
         A.denoise = denoise_params(look.noise, n_lum, wn)
         # Isolated dark defects (cold pixels, stacking holes) are left alone like stars: shrinking the small
         # coefficients around them would spread them into dark blobs.
-        Lw = luminance(np, prepped)
-        sky_l, sig_l = lp.clipped_stats(Lw[stat_w])
-        cold = (Lw < sky_l - COLD_SIGMAS * max(sig_l, STAT_FLOOR)) & weight
+        def _cold() -> np.ndarray:
+            Lw = luminance(np, prepped)
+            sky_l, sig_l = lp.clipped_stats(Lw[stat_w])
+            return (Lw < sky_l - COLD_SIGMAS * max(sig_l, STAT_FLOOR)) & weight
+
+        cold = timings.run("defect search", "cpu", _cold)
         if cold.any():
             from scipy import ndimage as _nd
 
@@ -611,6 +873,7 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
                 ai["ai_denoise"] = {"status": "pending"}
 
     # ---------------------------------------------------------------- pixel group A
+    noise_report()  # join the helper thread before the pixel groups use every core
     backend_name, backend_reason = choose_backend(opts, h, w, channels)
     gpu_disabled = opts.gpu_disabled
     exec_info: dict[str, Any] = {}
@@ -631,12 +894,12 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
     else:
         proc = work.astype(np.float32, copy=False)
     del grad_map
-    proc_changed = A.needed
+    proc_changed = A.needed or cosmetic_changed
 
     # ---------------------------------------------------------------- optional AI denoise and star separation
     sig_before_ai: float | None = None
     if (ai.get("ai_denoise") or {}).get("status") == "pending":
-        if mode == "linear" and recipe.tone.enabled:
+        if mode == "linear":  # used by the stretch solver when the stretch is on
             sig_before_ai = stretch_statistics(proc, stat_w, star_hard)[1]
         res = _run_ai(opts, "denoise", rgb, progress, "Reducing noise (AI)", lambda run: ai_denoise(proc, weight, look.noise, run, check, _percent(progress, "Reducing noise (AI)")))
         if res["status"] == "applied":
@@ -666,6 +929,57 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
                 disp_src = res.pop("result")
             ai["ai_stars"] = res
     stars_sep = disp_src is not proc
+    return LinearStage(
+        image=image, frame=frame, baseline=baseline, regions=regions, protected=protected, weight=weight, edge_info=edge_info,
+        stat_w=stat_w, star=star, noise=dict(noise_report()), bg_status=bg_status, bg_model=bg_model, bg_strength=bg_strength,
+        ai=ai, grad_status=grad_status, grad_model=grad_model, sky=sky, neutral_status=neutral_status, wb=wb, wb_status=wb_status,
+        catalog=catalog, A=A, deconv_status=deconv_status, decisions=decisions, proc=proc, proc_changed=proc_changed,
+        disp_src=disp_src, sig_before_ai=sig_before_ai, backend_name=backend_name, backend_reason=backend_reason,
+        gpu_disabled=gpu_disabled, exec_info=exec_info, star_in=star_in, timings=list(timings.items),
+        seconds=time.perf_counter() - t_start, cosmetic_status=cosmetic_status, edges=edges,
+    )
+
+
+def finish_display(s: LinearStage, recipe: Recipe, ctx: AssetContext, opts: ExecutionOptions | None = None,
+                   reused: bool = False) -> PipelineResult:
+    """Display decisions, pixel group B, the clipping guardrail and the report, from a (possibly reused) linear stage."""
+    import copy
+
+    opts = opts or ExecutionOptions()
+    check, progress = _progress_fns(opts)
+    timings = _Timings()
+    t_start = time.perf_counter()
+    if reused:
+        timings.add("linear stage (reused)", "cache", 0.0, note=f"computed earlier in {s.seconds:.2f} s; stages: "
+                    + ", ".join(t["stage"] for t in s.timings))
+    else:
+        timings.items = list(s.timings)
+        t_start -= s.seconds
+    image = s.image
+    h, w = image.height, image.width
+    channels = image.channels
+    rgb = channels == 3
+    mode = "linear" if image.domain == "linear" else "rendered"
+    look, auto, adv = recipe.look, recipe.auto, recipe.advanced
+    notes: list[str] = list(image.notes)
+    decisions: dict[str, Any] = copy.deepcopy(s.decisions)
+    threads = cpu_threads(opts)
+    flags = _flags(image, recipe, ctx)
+    manual, tone_stage, narrowband, filter_kind, hubble_ready, is_noop = (
+        flags.manual, flags.tone_stage, flags.narrowband, flags.filter_kind, flags.hubble_ready, flags.is_noop)
+    frame, baseline, regions, protected, weight, edge_info, stat_w = s.frame, s.baseline, s.regions, s.protected, s.weight, s.edge_info, s.stat_w
+    star, star_hard, star_soft = s.star, s.star_hard, s.star_soft
+    bg_status, bg_model, bg_strength = copy.deepcopy(s.bg_status), s.bg_model, s.bg_strength
+    ai = copy.deepcopy({k: {kk: vv for kk, vv in v.items() if kk != "result"} for k, v in s.ai.items()})
+    grad_status, grad_model, sky, neutral_status = copy.deepcopy(s.grad_status), s.grad_model, s.sky, copy.deepcopy(s.neutral_status)
+    wb, wb_status, catalog, A, deconv_status = s.wb, copy.deepcopy(s.wb_status), copy.deepcopy(s.catalog), s.A, copy.deepcopy(s.deconv_status)
+    proc, proc_changed, disp_src, sig_before_ai = s.proc, s.proc_changed, s.disp_src, s.sig_before_ai
+    backend_name, backend_reason, gpu_disabled = s.backend_name, s.backend_reason, s.gpu_disabled
+    exec_info, star_in = copy.deepcopy(s.exec_info), s.star_in
+    stars_sep = disp_src is not proc
+
+    def noise_report() -> dict[str, float]:
+        return s.noise
 
     # ---------------------------------------------------------------- analysis 2: display decisions (CPU)
     progress("Choosing the stretch")
@@ -677,7 +991,7 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
     y0: np.ndarray
     if mode == "linear":
         if recipe.tone.enabled:
-            sky_l, sig_l, hi_l = stretch_statistics(disp_src, stat_w, star_hard)
+            sky_l, sig_l, hi_l = timings.run("stretch statistics", "cpu", lambda: stretch_statistics(disp_src, stat_w, star_hard))
             if sig_before_ai is not None and (ai.get("ai_denoise") or {}).get("status") == "applied":
                 # AI denoising flattens the sky far more than its true noise drops; the stretch solver would read that as
                 # "almost no noise" and stretch until residual mottle and color are amplified. The stretch therefore
@@ -697,7 +1011,7 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
                     log_d=adv.stretch_log_d, b=adv.stretch_b, p=adv.highlight_convergence, decades_per_unit=STRETCH_DECADES_PER_UNIT,
                 )
             B.sp = sp
-            y0 = timings.run("display preview", "cpu", lambda: apply_stretch(np, disp_src, sp))
+            y0 = timings.run("display preview", "cpu", lambda: rowwise(lambda rows: apply_stretch(np, disp_src[rows], sp), h, threads))
             B.sky_disp, B.sky_sd = sp.target, sp.sky_display_sigma
             if auto.star_stretch and star_soft is not None:
                 B.sp_star = sp.gentler()
@@ -731,7 +1045,7 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
 
     hdr_status: dict[str, Any] = {"status": "off", "reason": None}
     if look.protect_cores and recipe.tone.enabled:
-        found, info = fin.detect_bright_core(Y0, use_ns)
+        found, info = timings.run("bright-core detection", "cpu", lambda: fin.detect_bright_core(Y0, use_ns))
         decisions["bright_core"] = info
         if found:
             B.hdr_amount = adv.hdr_amount if adv.hdr_amount is not None else DEFAULT_HDR_AMOUNT
@@ -741,8 +1055,11 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
     scnr_status: dict[str, Any] = {"status": "off", "reason": None}
     if narrowband and auto.green_removal:
         scnr_status = {"status": "skipped", "reason": "Preserving the selected narrowband palette."}
+    elif flags.dualband and auto.green_removal and not is_noop:
+        scnr_status = {"status": "skipped", "reason": "Green carries OIII (teal) signal through a dual-band (H-alpha/OIII) filter, "
+                                                       "so green removal is skipped."}
     elif rgb and auto.green_removal and not is_noop:
-        excess = fin.green_excess(y0, use_ns, B.sky_disp, B.sky_sd)
+        excess = timings.run("green-cast check", "cpu", lambda: fin.green_excess(y0, use_ns, B.sky_disp, B.sky_sd))
         decisions["green_excess"] = excess
         if excess > fin.SCNR_DETECT_EXCESS:
             B.scnr_amount = adv.scnr_amount if adv.scnr_amount is not None else DEFAULT_SCNR_AMOUNT
@@ -751,17 +1068,42 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
             scnr_status = {"status": "skipped", "reason": f"No green cast remained after color balance (excess {excess:.4f})."}
     if look.detail > 0:
         n_d = fin.scales_for(adv.detail_scale_px)
-        dn = timings.run("detail noise", "cpu", lambda: estimate_wavelet_noise(Y0, stat_w, star_hard, n_d, n_d, STAT_FLOOR))
+        dn = timings.run("detail noise", "cpu", lambda: estimate_wavelet_noise(Y0, stat_w, star_hard, n_d, n_d, STAT_FLOOR, threads))
         B.detail = fin.DetailParams(look.detail, n_d, dn.lum)
     B.pop_a = POP_PER_CONTRAST * look.contrast
     B.saturation = 1.0 + SATURATION_PER_COLOR * look.color if rgb else 1.0
     if rgb and recipe.object_color.active and (star_soft is not None or stars_sep):
         B.object_color = recipe.object_color
     if hubble_ready and (star_soft is not None or stars_sep):
-        palette_stats = lp.sky_stats(disp_src, use_ns if use_ns.any() else stat_w)
+        palette_stats = lp.sky_stats(disp_src, use_ns if use_ns.any() else stat_w, threads)
         B.hubble_strength = recipe.hubble_strength
         B.hubble_sky = tuple(palette_stats.level)
         B.hubble_sigma = max(palette_stats.sigma)
+    star_color_status: dict[str, Any] = {"status": "off", "reason": None}
+    if look.star_color > 0:
+        if not rgb:
+            star_color_status = {"status": "skipped", "reason": "Monochrome image."}
+        elif star_soft is None and not stars_sep:
+            star_color_status = {"status": "skipped", "reason": "No reliable star mask, so star color cannot be limited to stars."}
+        else:
+            B.star_color = look.star_color
+            star_color_status = {"status": "applied", "reason": None}
+    fringe_status: dict[str, Any] = {"status": "off", "reason": None}
+    fringe_ring: np.ndarray | None = None
+    if auto.halo_reduction and rgb and recipe.tone.enabled and not is_noop:
+        y_full = y0
+        if stars_sep and sp is not None:  # the fringes live in the star layer: measure on the image with its stars
+            y_full = rowwise(lambda rows: apply_stretch(np, proc[rows], sp), h, threads)
+        fringe_ring, finfo = timings.run("star-fringe check", "cpu", lambda: fin.detect_fringe(y_full, star_hard, stat_w))
+        decisions["star_fringe"] = finfo
+        if fringe_ring is not None:
+            B.fringe_amount = DEFAULT_FRINGE_AMOUNT
+            fringe_status = {"status": "applied", "reason": None, "parameters": {**finfo, "amount": DEFAULT_FRINGE_AMOUNT}}
+        else:
+            fringe_status = {"status": "skipped", "reason": finfo.get("reason")}
+        del y_full
+    elif auto.halo_reduction and not rgb and not is_noop:
+        fringe_status = {"status": "skipped", "reason": "Monochrome image: there is no color fringe."}
     del y0, Y0
 
     # ---------------------------------------------------------------- pixel group B with clipping guardrail
@@ -770,11 +1112,13 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
     first_counts = None
     guard_action = "none"
     needs_review = False
-    base_vals = {"pop_a": B.pop_a, "saturation": B.saturation, "hdr": B.hdr_amount, "detail": B.detail, "gain": B.rend_gain}
+    base_vals = {"pop_a": B.pop_a, "saturation": B.saturation, "hdr": B.hdr_amount, "detail": B.detail, "gain": B.rend_gain,
+                 "star_color": B.star_color}
     while True:
         attempt += 1
         B.pop_a = base_vals["pop_a"] * reduction
         B.saturation = 1.0 + (base_vals["saturation"] - 1.0) * reduction
+        B.star_color = base_vals["star_color"] * reduction
         B.object_scale = reduction
         B.hdr_amount = base_vals["hdr"] * reduction
         B.rend_gain = 1.0 + (base_vals["gain"] - 1.0) * reduction
@@ -785,6 +1129,8 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
         exec_b = {"x": disp_src, "w": weight.astype(np.float32), "star": star_in, "src": baseline}
         if B.separated:
             exec_b["full"] = proc
+        if B.fringe_amount > 0 and fringe_ring is not None:
+            exec_b["fringe"] = fringe_ring
         keys = ["y", "fixed"] if mode == "linear" else ["y"]
         outputs, counts, backend_name, info_b, gpu_disabled = _execute(
             lambda be, t, inner: _group_b(be, t, inner, B), exec_b, keys, B.halo, h, w, channels, opts, backend_name, gpu_disabled,
@@ -830,10 +1176,20 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
             processed = image.pixels
 
     # ---------------------------------------------------------------- report
+    from .framing import clean_frame
+
+    decisions["clean_frame"] = timings.run("clean-frame search", "cpu", lambda: clean_frame(image.valid_mask, s.edges))
     ctx_r = _ReportCtx(recipe, image, mode, rgb, A, B, sp, star, bg_status, bg_model, bg_strength, grad_status, grad_model, neutral_status,
                        sky, wb, wb_status, deconv_status, hdr_status, scnr_status, reduction, is_noop, regions, backend_name, tone_stage, ai)
     learned = [k for k, v in ai.items() if v.get("status") == "applied"]
     ops = _operation_report(ctx_r)
+    ops.insert(0, {"name": "cosmetic", "requested": auto.cosmetic, **s.cosmetic_status})
+    ops.append({"name": "star_color", "requested": look.star_color > 0,
+                **({**star_color_status, "status": "reduced"} if star_color_status["status"] == "applied" and reduction < 1 else star_color_status),
+                **({"parameters": {"amount": look.star_color, "effective_amount": look.star_color * reduction,
+                                   "method": "saturation of existing color inside the soft star mask, gamut-limited"}}
+                   if star_color_status["status"] == "applied" else {})})
+    ops.append({"name": "star_fringe", "requested": auto.halo_reduction, **fringe_status})
     if recipe.catalog_sha256:
         ops.append({"name": "catalog_color", "requested": True, **catalog,
                     "fallback": wb_status["status"] if catalog["status"] != "applied" else None})
@@ -911,10 +1267,10 @@ def run_pipeline(image: ImageData, recipe: Recipe, ctx: AssetContext, opts: Exec
         "total_seconds": round(time.perf_counter() - t_start, 4),
         "dependencies": dependency_versions(),
         "noise_estimate": {
-            **noise_report,
+            **noise_report(),
             "limitations": "Robust MAD of Gaussian high-pass residuals over valid, unprotected, non-star pixels. "
             "Stacking/resampling correlate noise, so this is approximate and not a calibrated signal-to-noise measurement.",
-        } if noise_report else None,
+        } if noise_report() else None,
         "learned_processing": learned,
         "scientific_disclosure": (
             ("Catalog RGB calibration uses relative reference-star colors, not absolute flux calibration. " if catalog["status"] == "applied" else
@@ -1010,15 +1366,30 @@ def _execute(fn, exec_in, out_keys, halo, h, w, channels, opts, backend_name, gp
                 info["gpu_budget_bytes"] = budget
             else:
                 be = factory("cpu")
-            tile = tile_override or _tile_plan(halo, channels, h, w, budget, opts.force_tile)
-            info["tile"] = None if tile >= max(h, w) else tile
+            workers = 1
+            if tile_override or opts.force_tile or name == "gpu":
+                tile = tile_override or _tile_plan(halo, channels, h, w, budget, opts.force_tile)
+            else:
+                tile = _tile_plan(halo, channels, h, w, budget, None)
+                threads = cpu_threads(opts)
+                if threads > 1 and h * w >= MIN_PARALLEL_PIXELS and tile >= max(h, w):
+                    # Several CPU threads on near-square tiles; the halo covers the chained footprint, so the result is
+                    # identical to a full-frame run.
+                    grid, workers = parallel_tiles(h, w, halo, threads, estimate_memory_per_pixel(channels), budget)
+                    if workers > 1:
+                        tile = grid
+            th, tw = (tile, tile) if isinstance(tile, int) else tile
+            full = th >= h and tw >= w
+            info["tile"] = None if full else (tile if isinstance(tile, int) else [th, tw])
+            info["cpu_threads"] = workers if name == "cpu" else None
             outputs = {k: np.empty(shape, dtype=np.float32) for k in out_keys}
             t0 = time.perf_counter()
-            extras = run_tiled(lambda t, inner: fn(be, t, inner), exec_in, outputs, tile, halo if tile < max(h, w) else 0, check)
+            extras = run_tiled(lambda t, inner: fn(be, t, inner), exec_in, outputs, tile, 0 if full else halo, check, workers)
             counts = merge_clip_counts([e for e in extras if e is not None]) if any(e is not None for e in extras) else None
             be.synchronize()
             elapsed = time.perf_counter() - t0
-            timings.items.append({"stage": stage_name, "backend": name, "seconds": round(elapsed, 4), "tile": info["tile"]})
+            timings.items.append({"stage": stage_name, "backend": name, "seconds": round(elapsed, 4), "tile": info["tile"],
+                                  "threads": workers})
             info.update(actual_backend=name, device=be.device_label, transfers=be.transfers.as_dict(), notes=notes)
             info["label"] = "Processing: NVIDIA GPU" if name == "gpu" else "Processing: CPU"
             be.release()
@@ -1232,9 +1603,13 @@ def _summary_note(ops) -> str:
         ("ai_denoise", "applied"): "AI noise reduction",
         ("ai_stars", "applied"): "Stars separated (AI)",
         ("star_brightness", "applied"): "Stars dimmed",
+        ("cosmetic", "applied"): "Defective pixels repaired",
+        ("star_color", "applied"): "Star colors enhanced",
+        ("star_color", "reduced"): "Star colors enhanced (reduced to limit clipping)",
+        ("star_fringe", "applied"): "Star color fringes reduced",
     }
     parts = []
-    quiet_skips = {"hdr", "green_removal", "gradient"}  # automatic stages that are expected to skip on many images
+    quiet_skips = {"hdr", "green_removal", "gradient", "cosmetic", "star_fringe"}  # automatic stages that often find nothing to do
     for op in ops:
         if op["name"] == "star_brightness" and op["status"] == "applied" and op["parameters"]["factor"] == 0:
             parts.append("Separated stars omitted")

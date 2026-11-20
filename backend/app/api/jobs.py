@@ -12,7 +12,7 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
 @router.post("", status_code=202)
-async def create_job(request: Request, body: JobCreate) -> dict[str, Any]:
+def create_job(request: Request, body: JobCreate) -> dict[str, Any]:
     db, coord, cfg = db_of(request), coord_of(request), cfg_of(request)
     existing = db.one("SELECT * FROM jobs WHERE request_key=?", (body.request_key,))
     if existing:  # idempotent retry: repeat clicks never duplicate expensive work
@@ -62,7 +62,7 @@ async def create_job(request: Request, body: JobCreate) -> dict[str, Any]:
 
 
 @router.get("")
-async def list_jobs(request: Request, active: bool = False) -> dict[str, Any]:
+def list_jobs(request: Request, active: bool = False) -> dict[str, Any]:
     db, coord = db_of(request), coord_of(request)
     where = "WHERE state IN ('queued','running')" if active else ""
     rows = db.all(f"SELECT * FROM jobs {where} ORDER BY created_at DESC LIMIT 50")
@@ -70,7 +70,7 @@ async def list_jobs(request: Request, active: bool = False) -> dict[str, Any]:
 
 
 @router.get("/{job_id}")
-async def get_job(request: Request, job_id: str) -> dict[str, Any]:
+def get_job(request: Request, job_id: str) -> dict[str, Any]:
     db = db_of(request)
     job = db.one("SELECT * FROM jobs WHERE id=?", (job_id,))
     if not job:
@@ -79,7 +79,7 @@ async def get_job(request: Request, job_id: str) -> dict[str, Any]:
 
 
 @router.post("/{job_id}/cancel")
-async def cancel_job(request: Request, job_id: str) -> dict[str, Any]:
+def cancel_job(request: Request, job_id: str) -> dict[str, Any]:
     db, coord = db_of(request), coord_of(request)
     if not coord.cancel_job(job_id):
         raise ApiError(404, "JOB_NOT_FOUND", "That job no longer exists.")
@@ -87,7 +87,7 @@ async def cancel_job(request: Request, job_id: str) -> dict[str, Any]:
 
 
 @router.post("/{job_id}/retry")
-async def retry_job(request: Request, job_id: str) -> dict[str, Any]:
+def retry_job(request: Request, job_id: str) -> dict[str, Any]:
     db, coord = db_of(request), coord_of(request)
     if not db.one("SELECT id FROM jobs WHERE id=?", (job_id,)):
         raise ApiError(404, "JOB_NOT_FOUND", "That job no longer exists.")

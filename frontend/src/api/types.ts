@@ -12,6 +12,7 @@ export interface LookRecipe {
   detail: number;
   noise: number;
   protect_cores: boolean;
+  star_color: number;
 }
 
 // Automatic stages; each measures the image and runs or is skipped with a reason. Mirrors AutoRecipe.
@@ -21,6 +22,8 @@ export interface AutoRecipe {
   white_balance: boolean;
   green_removal: boolean;
   star_stretch: boolean;
+  cosmetic: boolean;
+  halo_reduction: boolean;
 }
 
 export interface ToneRecipe {
@@ -99,6 +102,8 @@ export interface ColorMixBody {
 export interface Recipe {
   schema_version: number;
   preset: string;
+  /** resolve the look per image from measurements (the Auto preset); look and preset Advanced values are then chosen */
+  auto_preset: boolean;
   look: LookRecipe;
   auto: AutoRecipe;
   tone: ToneRecipe;
@@ -161,6 +166,9 @@ export interface Question {
   title: string;
   help?: string;
   options: QuestionOption[];
+  /** answer suggested from explicit header evidence; the user still confirms it */
+  recommended?: string | number;
+  recommendation_reason?: string;
 }
 
 export interface HduCandidate {
@@ -262,8 +270,10 @@ export interface ExportEntry {
   kind: ExportKind;
   filename: string;
   label: string;
-  bytes: number;
-  sha256: string;
+  /** null until a deferred export has been rendered on first request */
+  bytes: number | null;
+  sha256: string | null;
+  deferred?: boolean;
   url: string;
 }
 
@@ -295,6 +305,72 @@ export interface Run {
 export interface RunDetail extends Run {
   applied: Record<string, unknown> | null;
   has_fixed_mapping: boolean;
+}
+
+export interface AutoPresetChoice {
+  chosen: string;
+  label: string;
+  reasons: string[];
+  look: LookRecipe;
+}
+
+export interface CleanFrame {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  width: number;
+  height: number;
+  needed: boolean;
+}
+
+export type LiveState = 'none' | 'queued' | 'running' | 'ready' | 'failed' | 'cancelled';
+
+export interface LivePreview {
+  id?: string;
+  state: LiveState;
+  stage?: string | null;
+  error?: string | null;
+  recipe?: Recipe;
+  summary?: string | null;
+  operations?: OperationNote[];
+  needs_review?: boolean | null;
+  seconds?: number | null;
+  reused?: boolean | null;
+  auto_preset?: AutoPresetChoice | null;
+  preview_url?: string | null;
+  has_fixed_mapping?: boolean;
+}
+
+export interface PresetPreviewItem {
+  id: string;
+  file: string;
+  url: string;
+  summary: string;
+  auto: string | null;
+}
+
+export interface PresetPreviews {
+  items: PresetPreviewItem[];
+  scale_factor: number;
+  note: string;
+}
+
+export interface FolderEntry {
+  name: string;
+  path: string;
+  fits: number;
+  is_sub: boolean;
+}
+
+export interface FolderListing {
+  path: string | null;
+  parent: string | null;
+  fits: number;
+  folders: FolderEntry[];
+  recent: FolderEntry[];
+  suggestions: FolderEntry[];
+  error?: string;
 }
 
 export interface RunList {
@@ -566,6 +642,8 @@ export interface ComputePatchBody {
 export interface AppSettings {
   compute: ComputeInfo;
   strip_location: boolean;
+  /** 0 keeps every result */
+  keep_runs_per_image: number;
   limits: { max_files: number; max_file_mib: number; max_megapixels: number };
   data_dir: string;
 }
@@ -588,7 +666,7 @@ export interface BatchExportStarted {
 
 export interface ExportStatus {
   id: string;
-  state: 'building' | 'ready' | 'failed';
+  state: 'building' | 'ready' | 'failed' | 'cancelled';
   detail: { done?: number; total?: number; bytes?: number; error?: ApiErrorBody } | null;
   download_url: string | null;
 }

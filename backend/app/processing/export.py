@@ -20,6 +20,8 @@ from .imagedata import ImageData
 from .readers.fits import SENSITIVE_KEYS
 from .recipe import PIPELINE_VERSION
 
+DEFERRED_TIFF = "enhanced-display.tif"  # rendered on request from the run's display.npy
+
 
 def quantize(display: np.ndarray, bits: int) -> np.ndarray:
     maxv = 255 if bits == 8 else 65535
@@ -45,10 +47,14 @@ def write_png(path: Path, display: np.ndarray, bits: int) -> None:
 
 
 def write_tiff16(path: Path, display: np.ndarray) -> None:
-    arr = quantize(display, 16)
+    write_tiff16_u16(path, quantize(display, 16))
+
+
+def write_tiff16_u16(path: Path, arr: np.ndarray, engine: str = PIPELINE_VERSION) -> None:
+    """16-bit display TIFF from already quantized values (the stored viewer array is exactly ``quantize(display, 16)``)."""
     tifffile.imwrite(
-        path, arr, photometric="rgb" if arr.ndim == 3 else "minisblack", compression="zlib",
-        software=f"EasyAstroEnhance {PIPELINE_VERSION}", metadata=None,
+        path, np.ascontiguousarray(arr), photometric="rgb" if arr.ndim == 3 else "minisblack", compression="zlib",
+        software=f"EasyAstroEnhance {engine}", metadata=None,
     )
 
 

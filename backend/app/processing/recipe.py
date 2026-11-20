@@ -12,6 +12,10 @@ Schema 4 (engine 1.2): adds the optional AI tools (``ai``), all off by default. 
 
 Schema 7 (engine 1.4): adds opt-in AI star dimming. Older recipes retain the full star blend.
 Schema 8 (engine 1.5): allows an explicit zero star blend for display output.
+Schema 9 (engine 1.6): Auto preset (``auto_preset``), automatic cosmetic correction and star-fringe reduction
+(``auto.cosmetic``, ``auto.halo_reduction``) and a star color slider (``look.star_color``). Older recipes migrate with the
+two automatic stages on (like the other automatic stages, each measures the image and is skipped with a reason) and star
+color 0, so their look is unchanged except where those stages find defects or fringes.
 """
 from __future__ import annotations
 
@@ -19,9 +23,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-PIPELINE_VERSION = "1.5.0"
-RECIPE_SCHEMA_VERSION = 8
-MIGRATABLE_SCHEMAS = {3, 4, 5, 6, 7}
+PIPELINE_VERSION = "1.6.0"
+RECIPE_SCHEMA_VERSION = 9
+MIGRATABLE_SCHEMAS = {3, 4, 5, 6, 7, 8}
 
 Strength = Literal["gentle", "balanced", "strong"]
 
@@ -49,6 +53,7 @@ class LookRecipe(_Strict):
     detail: float = Field(0.1, ge=0.0, le=1.0, description="Multiscale local contrast")
     noise: float = Field(0.5, ge=0.0, le=1.0, description="Noise reduction relative to the measured noise")
     protect_cores: bool = True
+    star_color: float = Field(0.0, ge=0.0, le=1.0, description="Saturation of existing star color inside the star mask")
 
 
 class AutoRecipe(_Strict):
@@ -59,6 +64,8 @@ class AutoRecipe(_Strict):
     white_balance: bool = True
     green_removal: bool = True
     star_stretch: bool = True
+    cosmetic: bool = True  # isolated colored hot pixels and cold pixels on faint background (linear stacks)
+    halo_reduction: bool = True  # measured blue/violet/magenta fringe in a narrow ring around bright stars
 
 
 class ToneRecipe(_Strict):
@@ -126,6 +133,7 @@ class FocusStretchRecipe(_Strict):
 class Recipe(_Strict):
     schema_version: int = RECIPE_SCHEMA_VERSION
     preset: str = "natural"
+    auto_preset: bool = False  # choose the look from image measurements (never from the object's name)
     look: LookRecipe = LookRecipe()
     auto: AutoRecipe = AutoRecipe()
     tone: ToneRecipe = ToneRecipe()
@@ -161,6 +169,7 @@ def parse_recipe(data: dict) -> Recipe:
 
 
 BUILTIN_PRESET_NAMES = {
+    "auto": "Auto",
     "natural": "Natural",
     "vivid": "Vivid",
     "faint-detail": "Faint detail",
@@ -168,13 +177,16 @@ BUILTIN_PRESET_NAMES = {
     "star-field": "Star field",
     "seestar-match": "Seestar match",
 }
+DEFAULT_PRESET = "auto"
 
 
 def builtin_presets() -> dict[str, Recipe]:
-    """Rendering styles chosen by the user (never inferred from the object's name)."""
+    """Rendering styles chosen by the user (never inferred from the object's name). ``auto`` resolves per image to one of
+    natural / faint-detail / bright-core / star-field from measurements (see ``auto_preset.py``)."""
     return {
+        "auto": Recipe(preset="auto", auto_preset=True),
         "natural": Recipe(preset="natural"),
-        "vivid": Recipe(preset="vivid", look=LookRecipe(background=0.10, contrast=0.5, color=0.6, detail=0.35)),
+        "vivid": Recipe(preset="vivid", look=LookRecipe(background=0.10, contrast=0.5, color=0.6, detail=0.35, star_color=0.3)),
         "faint-detail": Recipe(
             preset="faint-detail", look=LookRecipe(background=0.16, stretch=0.5, contrast=0.15, color=0.4, detail=0.15, noise=0.75)
         ),
@@ -182,7 +194,7 @@ def builtin_presets() -> dict[str, Recipe]:
             preset="bright-core", look=LookRecipe(contrast=0.25, color=0.33, detail=0.35), advanced=AdvancedRecipe(hdr_amount=0.8)
         ),
         "star-field": Recipe(
-            preset="star-field", look=LookRecipe(background=0.10, stretch=-0.3, color=0.3, detail=0.0, noise=0.35),
+            preset="star-field", look=LookRecipe(background=0.10, stretch=-0.3, color=0.3, detail=0.0, noise=0.35, star_color=0.5),
             advanced=AdvancedRecipe(star_stretch_amount=0.6),
         ),
         "seestar-match": Recipe(preset="seestar-match", look=LookRecipe(background=0.15, contrast=0.0, color=0.17, detail=0.0, noise=0.4)),
@@ -194,7 +206,8 @@ def no_operations_recipe() -> Recipe:
     return Recipe(
         preset="custom",
         look=LookRecipe(contrast=0.0, color=0.0, detail=0.0, noise=0.0, protect_cores=False),
-        auto=AutoRecipe(neutralize=False, gradient=False, white_balance=False, green_removal=False, star_stretch=False),
+        auto=AutoRecipe(neutralize=False, gradient=False, white_balance=False, green_removal=False, star_stretch=False,
+                        cosmetic=False, halo_reduction=False),
         tone=ToneRecipe(enabled=False),
         background=BackgroundRecipe(enabled=False),
         protect_regions=False,

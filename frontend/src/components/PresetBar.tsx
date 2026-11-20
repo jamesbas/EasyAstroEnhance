@@ -1,13 +1,13 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { api } from '../api/client';
-import type { Preset } from '../api/types';
+import type { Asset, Preset, PresetPreviews, Recipe } from '../api/types';
 import { useToasts } from '../hooks/useToasts';
-import { PRESET_DESCRIPTIONS } from '../lib/recipe';
+import { cloneRecipe, PRESET_DESCRIPTIONS } from '../lib/recipe';
 import { Modal } from './Modal';
 
 // Built-in presets in the order they should be offered (the API lists them alphabetically).
-const BUILTIN_ORDER = ['natural', 'vivid', 'faint-detail', 'bright-core', 'star-field', 'seestar-match'];
+const BUILTIN_ORDER = ['auto', 'natural', 'vivid', 'faint-detail', 'bright-core', 'star-field', 'seestar-match'];
 const order = (id: string) => {
   const i = BUILTIN_ORDER.indexOf(id);
   return i < 0 ? BUILTIN_ORDER.length : i;
@@ -20,6 +20,65 @@ interface PresetBarProps {
   onSelect: (id: string) => void;
   onSave: (name: string) => Promise<void>;
   onChanged: () => Promise<void>;
+  asset?: Asset | null;
+  recipe?: Recipe | null;
+}
+
+// Quick-look thumbnails of the current image with each built-in preset, rendered on a reduced-size copy. The user's
+// other settings (tone, color tools, automatic stages) are kept; the optional AI tools are left out to stay quick.
+function PresetPreviewStrip({ asset, recipe, presets, presetId, onSelect }: { asset: Asset; recipe: Recipe; presets: Preset[]; presetId: string; onSelect: (id: string) => void }) {
+  const toasts = useToasts();
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ assetId: string; data: PresetPreviews } | null>(null);
+  useEffect(() => setResult(null), [asset.id]);
+
+  const run = async () => {
+    setBusy(true);
+    try {
+      const items = presets.map((p) => {
+        const r = cloneRecipe(p.recipe as Recipe);
+        return { id: p.id, recipe: { ...recipe, look: r.look, advanced: { ...recipe.advanced, hdr_amount: r.advanced.hdr_amount, star_stretch_amount: r.advanced.star_stretch_amount },
+          auto_preset: r.auto_preset, preset: p.id, ai: { ...recipe.ai, background: false, denoise: false, stars: false } } };
+      });
+      setResult({ assetId: asset.id, data: await api.presetPreviews(asset.id, items) });
+    } catch (err) {
+      toasts.error(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const data = result?.assetId === asset.id ? result.data : null;
+  return (
+    <div className="preset-previews" data-testid="preset-previews">
+      {!data && (
+        <button type="button" className="btn small" disabled={busy || asset.status !== 'ready'} onClick={() => void run()} data-testid="preview-presets">
+          {busy ? 'Making previews…' : 'Preview presets on this image'}
+        </button>
+      )}
+      {data && (
+        <>
+          <div className="preset-thumbs" role="list">
+            {data.items.map((it) => {
+              const p = presets.find((x) => x.id === it.id);
+              return (
+                <button key={it.id} type="button" role="listitem" className={`preset-thumb${it.id === presetId ? ' active' : ''}`}
+                  onClick={() => onSelect(it.id)} title={it.summary} data-testid={`preset-thumb-${it.id}`}>
+                  <img src={it.url} alt={`${p?.name ?? it.id} preview`} loading="lazy" />
+                  <span>{p?.name ?? it.id}{it.auto ? ` → ${it.auto}` : ''}</span>
+                </button>
+              );
+            })}
+          </div>
+          <p className="muted small">{data.note} Optional AI tools are not included in these quick looks. Click one to use it.</p>
+          <div className="row">
+            <button type="button" className="btn tiny" disabled={busy} onClick={() => void run()}>{busy ? 'Updating…' : 'Update previews'}</button>
+            <button type="button" className="btn tiny" disabled={busy} onClick={() => setResult(null)} data-testid="hide-preset-previews">Hide</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
 }
 
 function SaveDialog({ onSave, onClose }: { onSave: (name: string) => Promise<void>; onClose: () => void }) {
@@ -158,6 +217,9 @@ export function PresetBar(props: PresetBarProps) {
         <p key={p.id} className="muted small warn-text">{p.name}: {p.migration_note}</p>
       ))}
       {current?.builtin && PRESET_DESCRIPTIONS[current.id] && <p className="muted small" data-testid="preset-description">{PRESET_DESCRIPTIONS[current.id]}</p>}
+      {props.asset && props.recipe && props.asset.can_process && (
+        <PresetPreviewStrip asset={props.asset} recipe={props.recipe} presetId={props.presetId} onSelect={props.onSelect}
+          presets={builtin.filter((p) => p.compatible && p.recipe)} />)}
       <details className="manage">
         <summary>Manage presets</summary>
         <ManagePopover presets={props.presets} activeId={props.presetId} onChanged={props.onChanged} onDeleted={(id) => { if (id === props.presetId) props.onSelect('custom'); }} />

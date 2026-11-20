@@ -1,13 +1,27 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent, PointerEvent } from 'react';
 import { api, readableError } from '../api/client';
-import type { EditExportBody } from '../api/types';
+import type { CleanFrame, EditExportBody } from '../api/types';
 import { clamp } from '../lib/format';
 import { Modal } from './Modal';
 
 const INITIAL_FRAME = { rotation: 0, zoom: 1, pan_x: 0, pan_y: 0 };
 
-export function EditExportDialog({ runId, onClose }: { runId: string; onClose: () => void }) {
+// Framing (zoom + pan, no rotation) whose crop window lies inside the clean rectangle, keeping the image's aspect ratio.
+// Mirrors backend/app/processing/edit_export.py: window = (W/zoom, H/zoom); left = (W - window) * (pan + 1) / 2.
+export function cropToClean(c: CleanFrame): { rotation: number; zoom: number; pan_x: number; pan_y: number } | null {
+  if (!c.needed || c.w <= 0 || c.h <= 0) return null;
+  const zoom = Math.max(c.width / c.w, c.height / c.h) * 1.004;
+  if (zoom > 4) return null;
+  const ww = c.width / zoom;
+  const wh = c.height / zoom;
+  const pan = (start: number, size: number, win: number, total: number) =>
+    total - win > 0.5 ? clamp((2 * (start + (size - win) / 2)) / (total - win) - 1, -1, 1) : 0;
+  const r = (v: number) => Math.round(v * 1000) / 1000;
+  return { rotation: 0, zoom: r(Math.max(1, zoom)), pan_x: r(pan(c.x, c.w, ww, c.width)), pan_y: r(pan(c.y, c.h, wh, c.height)) };
+}
+
+export function EditExportDialog({ runId, onClose, cleanFrame = null }: { runId: string; onClose: () => void; cleanFrame?: CleanFrame | null }) {
   const [frame, setFrame] = useState(INITIAL_FRAME);
   const [includeTarget, setIncludeTarget] = useState(false);
   const [target, setTarget] = useState('');
@@ -22,6 +36,7 @@ export function EditExportDialog({ runId, onClose }: { runId: string; onClose: (
   const lookup = useRef(false);
   const userEditedTarget = useRef(false);
   const pendingTarget = includeTarget && !target.trim();
+  const cleanCrop = useMemo(() => (cleanFrame ? cropToClean(cleanFrame) : null), [cleanFrame]);
   const previewRequest = useMemo<EditExportBody>(() => ({
     ...frame, target: includeTarget ? target : '', label, format: 'png',
   }), [frame, includeTarget, target, label]);
@@ -124,6 +139,10 @@ export function EditExportDialog({ runId, onClose }: { runId: string; onClose: (
           <button type="button" className="btn small" onClick={() => rotate(frame.rotation - 90)}>Rotate left 90°</button>
           <button type="button" className="btn small" onClick={() => rotate(frame.rotation + 90)}>Rotate right 90°</button>
           <button type="button" className="btn small" onClick={() => setFrame(INITIAL_FRAME)}>Reset framing</button>
+          <button type="button" className="btn small" disabled={!cleanCrop} onClick={() => cleanCrop && setFrame(cleanCrop)} data-testid="crop-stacking-edges"
+            title={cleanCrop ? 'Zooms to the largest area without the uneven stacking edges' : cleanFrame?.needed ? 'The clean area is too small to crop to (more than 4× zoom).' : 'No stacking edges were found in this result.'}>
+            Crop stacking edges
+          </button>
         </div>
         <label>Rotation: {frame.rotation}° <input type="range" aria-label="Rotation" min={-180} max={180} step={1} value={frame.rotation}
           onChange={(e) => setFrame((v) => ({ ...v, rotation: e.target.valueAsNumber, pan_x: 0, pan_y: 0 }))} /></label>

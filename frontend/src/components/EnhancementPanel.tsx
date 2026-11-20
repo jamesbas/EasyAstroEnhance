@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react';
-import type { AITool, Asset, Job, Preset, Recipe, Strength } from '../api/types';
+import type { AITool, Asset, AutoPresetChoice, Job, Preset, Recipe, Strength } from '../api/types';
 import type { AIModels } from '../hooks/useAIModels';
+import type { LiveStatus } from '../hooks/useLivePreview';
+import { usePersistent } from '../hooks/usePersistent';
 import { backgroundPending, isMono } from '../lib/recipe';
 import type { BgDraft, ViewerTool } from '../types/ui';
 import { AdvancedPanel } from './AdvancedPanel';
@@ -55,6 +57,8 @@ export interface EnhancementPanelProps {
   star: StarState;
   onChangeState: () => void;
   onAssetUpdated: (a: Asset) => void;
+  autoChoice: AutoPresetChoice | null;
+  live: { on: boolean; onToggle: (on: boolean) => void; status: LiveStatus; current: boolean; error: string | null; seconds: number | null };
 }
 
 interface OptionRowProps {
@@ -84,16 +88,31 @@ function OptionRow(p: OptionRowProps) {
   );
 }
 
+const PANEL_MODES = ['simple', 'all'] as const;
+
+function liveText(l: EnhancementPanelProps['live']): string {
+  if (l.status === 'failed') return l.error ?? 'The live preview could not be made.';
+  if (l.status === 'waiting' || l.status === 'working') return 'Updating the live preview…';
+  if (l.status === 'ready' && l.current) return `Showing your new settings (not saved${l.seconds ? `, ${l.seconds.toFixed(1)} s` : ''}).`;
+  return 'Shows changed settings on the image before you save a result.';
+}
+
 export function EnhancementPanel(p: EnhancementPanelProps) {
+  const [mode, setMode] = usePersistent('eae.panel', 'simple', PANEL_MODES);
   const { recipe, asset } = p;
   if (!recipe) {
     return <aside className="panel" aria-label="Enhancement settings"><p className="muted pad">Loading settings…</p></aside>;
   }
+  const simple = mode === 'simple';
   const mono = isMono(asset);
   const pending = p.assets.filter((a) => a.status === 'ready' && backgroundPending(recipe, a));
   const blocked = asset !== null && asset.status === 'needs_input';
   const hasLabelRegion = asset !== null && asset.regions.length > 0;
   const busy = p.submitting || p.jobs.length > 0;
+  const hiddenOn = [
+    recipe.ai.background && 'AI background', recipe.ai.denoise && 'AI noise reduction', recipe.ai.stars && 'AI star separation',
+    recipe.background.enabled && 'background from sky samples', !recipe.tone.enabled && 'stretch off',
+  ].filter(Boolean) as string[];
 
   let why: string | null = null;
   if (p.allReady === 0) {
@@ -107,15 +126,31 @@ export function EnhancementPanel(p: EnhancementPanelProps) {
   return (
     <aside className="panel" aria-label="Enhancement settings">
       <div className="panel-scroll">
-        <PresetBar presets={p.presets} presetId={p.presetId} disabled={false} onSelect={p.selectPreset} onSave={p.savePreset} onChanged={p.reloadPresets} />
+        <div className="panel-mode">
+          <div className="segmented small" role="group" aria-label="Controls shown">
+            <button type="button" className={`seg${simple ? ' active' : ''}`} aria-pressed={simple} onClick={() => setMode('simple')} data-testid="panel-simple">Simple</button>
+            <button type="button" className={`seg${simple ? '' : ' active'}`} aria-pressed={!simple} onClick={() => setMode('all')} data-testid="panel-all">All controls</button>
+          </div>
+        </div>
+        <PresetBar presets={p.presets} presetId={p.presetId} disabled={false} onSelect={p.selectPreset} onSave={p.savePreset} onChanged={p.reloadPresets}
+          asset={asset} recipe={recipe} />
 
-        <LookControls look={recipe.look} stretchOn={recipe.tone.enabled && !(recipe.focus_stretch.enabled && asset?.baseline?.domain === 'linear')} mono={mono} edit={p.edit} />
+        <LookControls look={recipe.look} stretchOn={recipe.tone.enabled && !(recipe.focus_stretch.enabled && asset?.baseline?.domain === 'linear')} mono={mono} edit={p.edit}
+          simple={simple} auto={recipe.auto_preset} autoChoice={recipe.auto_preset ? p.autoChoice : null} />
 
+        {simple && (
+          <p className="muted small" data-testid="simple-note">
+            {hiddenOn.length > 0 ? `Also on: ${hiddenOn.join(', ')}. ` : ''}
+            Color, detail, AI tools, tone and more are in <button type="button" className="link-btn" onClick={() => setMode('all')}>All controls</button>.
+          </p>
+        )}
+
+        {!simple && (<>
         <AIToolsPanel ai={recipe.ai} asset={asset} models={p.aiModels} onToggle={p.setAI}
           onStarBrightness={(factor) => p.edit((r) => { r.ai.star_brightness = factor; })} />
 
         <div className="options">
-          <OptionRow id="background" label="Manual sky regions" checked={recipe.background.enabled} strength={recipe.background.strength}
+          <OptionRow id="background" label="Correct background from my sky samples" checked={recipe.background.enabled} strength={recipe.background.strength}
             hint="Optional: correct the background from sky regions you confirm for this image. The automatic background steps already run without it."
             onChecked={(v) => p.edit((r) => { r.background.enabled = v; })} onStrength={(s) => p.edit((r) => { r.background.strength = s; })}>
             {recipe.background.enabled && asset && (
@@ -146,13 +181,21 @@ export function EnhancementPanel(p: EnhancementPanelProps) {
         )}
 
         <AdvancedPanel asset={asset} recipe={recipe} edit={p.edit} star={p.star} onChangeState={p.onChangeState} onAssetUpdated={p.onAssetUpdated} />
+        </>)}
       </div>
 
       <div className="panel-actions">
+        <div className="live-row" data-testid="live-row">
+          <Switch checked={p.live.on} onChange={p.live.onToggle} label="Live preview" testId="switch-live" describedBy="hint-live" />
+          <p className={`option-hint${p.live.status === 'failed' ? ' warn-text' : ''}`} id="hint-live" data-testid="live-status">{liveText(p.live)}</p>
+        </div>
         {p.settingsChanged && (
           <div className="changed-row">
             <span className="badge warn" data-testid="settings-changed">Settings changed</span>
-            <button type="button" className="btn small" disabled={busy || !asset?.can_process} onClick={p.onReprocess} data-testid="reprocess-button">Reprocess</button>
+            <button type="button" className="btn small" disabled={busy || !asset?.can_process} onClick={p.onReprocess} data-testid="reprocess-button"
+              title={p.live.current ? 'Saves the live preview as a new result (no recomputation needed)' : undefined}>
+              {p.live.status === 'ready' && p.live.current ? 'Save this result' : 'Reprocess'}
+            </button>
           </div>
         )}
         <button type="button" className="btn primary big" disabled={busy || p.selectedReady === 0} onClick={p.onEnhanceSelected} data-testid="enhance-selected">

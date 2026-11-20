@@ -1,7 +1,7 @@
 # EasyAstroEnhance – Copilot instructions
 
 - Follow `astro-photo-enhancer-app-spec.md` and its processing fidelity contract.
-- Keep originals immutable and never add celestial content (no generative or reference-image processing). Learned (AI) processing is allowed only through the opt-in AI tools of spec amendment 1.5: pinned, SHA-256-verified models, off by default, each step disclosed with its model in the report.
+- Keep originals immutable and never add celestial content (no generative or reference-image processing). Learned (AI) processing is allowed only through the opt-in AI tools of spec amendments 1.5 and 1.7 (never super-resolution): pinned, SHA-256-verified models, off by default, each step disclosed with its model in the report.
 - Use typed API models and small pure processing functions; `backend/app/processing` must not import FastAPI, SQLite or UI code.
 - Preserve precision, channel interpretation, masks, metadata lineage and input-state distinctions. TIFF/FITS never pass through 8-bit.
 - Keep main controls simple; hide algorithm parameters in Advanced.

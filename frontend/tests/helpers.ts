@@ -20,6 +20,11 @@ export async function resetBackend(request: APIRequestContext): Promise<void> {
   expect(res.ok(), 'history cleared').toBeTruthy();
 }
 
+// The panel starts in Simple mode; specs that exercise the detailed controls open All controls (a stored UI choice).
+export async function showAllControls(page: Page): Promise<void> {
+  await page.addInitScript(() => window.localStorage.setItem('eae.panel', 'all'));
+}
+
 export async function uploadAndWaitReady(page: Page, file: string = TEST_JPEG): Promise<void> {
   await page.getByTestId('file-input').setInputFiles(file);
   const card = page.getByTestId('asset-card').first();

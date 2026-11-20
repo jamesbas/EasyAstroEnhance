@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, uploadAssets } from './api/client';
-import type { Asset, Interpretation, Question } from './api/types';
+import type { Asset, AutoPresetChoice, CleanFrame, Interpretation, Question } from './api/types';
 import { ChannelMixDialog, isLinearFits } from './components/ChannelMixDialog';
 import { CompareViewer } from './components/CompareViewer';
 import { EnhancementPanel } from './components/EnhancementPanel';
@@ -20,6 +20,8 @@ import { useBgDrafts } from './hooks/useBgDrafts';
 import { useAIModels } from './hooks/useAIModels';
 import { useAppVersion } from './hooks/useAppVersion';
 import { useCompute } from './hooks/useCompute';
+import { useLivePreview } from './hooks/useLivePreview';
+import { usePersistent } from './hooks/usePersistent';
 import { useRecipe } from './hooks/useRecipe';
 import { useRunDetail, useRunHistory } from './hooks/useRunHistory';
 import { useSelection } from './hooks/useSelection';
@@ -27,7 +29,7 @@ import { useStarMask } from './hooks/useStarMask';
 import { useToasts } from './hooks/useToasts';
 import { useWindowDrop } from './hooks/useWindowDrop';
 import { assetIsActive, useWorkspace } from './hooks/useWorkspace';
-import { STATE_QUESTION } from './lib/intake';
+import { recommendedAnswers, STATE_QUESTION } from './lib/intake';
 import { recipesDiffer } from './lib/recipe';
 import type { Mark, ViewerTool } from './types/ui';
 
@@ -115,6 +117,21 @@ export default function App() {
   const settingsChanged = Boolean(
     rec.recipe && latestRun && primary && !assetIsActive(primary) && recipesDiffer(rec.recipe, latestRun.recipe),
   );
+
+  // ---- live preview of changed settings (never saved) and the style Auto chose for this image
+  const [liveOn, setLiveOn] = usePersistent('eae.live', 'on', ['on', 'off'] as const);
+  const liveEnabled = Boolean(
+    liveOn === 'on' && settingsChanged && primary?.can_process && displayedRun && displayedRun.id === latestRun?.id && !submitting,
+  );
+  const live = useLivePreview(primary?.id ?? null, rec.recipe, liveEnabled);
+  const livePreview = live.preview && live.preview.preview_url ? live.preview : null;
+  const runAuto = (runDetail?.applied?.auto_preset ?? null) as AutoPresetChoice | null;
+  const autoChoice = (livePreview?.auto_preset ?? null) ?? (displayedRun?.recipe.auto_preset ? runAuto : null);
+  const { adoptAutoChoice } = rec;
+  const autoAdoptKey = autoChoice ? `${primary?.id}:${autoChoice.chosen}:${JSON.stringify(autoChoice.look)}` : '';
+  useEffect(() => {
+    adoptAutoChoice(autoChoice);
+  }, [autoAdoptKey, adoptAutoChoice]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- announcements & item transitions
   const seenItems = useRef(new Map<string, string>());
@@ -228,6 +245,27 @@ export default function App() {
     },
     [upsert, refresh, notifyError],
   );
+
+  // Files whose every open question has a header-based recommendation can be confirmed together in one click.
+  const recommendable = useMemo(
+    () => assets.flatMap((a) => {
+      const answers = recommendedAnswers(a);
+      return answers ? [{ id: a.id, answers }] : [];
+    }),
+    [assets],
+  );
+
+  const applyRecommended = useCallback(async () => {
+    try {
+      const updated = await Promise.all(recommendable.map((r) => api.setInterpretation(r.id, r.answers)));
+      upsert(updated);
+      setForced(null);
+      setAnnouncement(`Confirmed the recommended answers for ${updated.length} file${updated.length === 1 ? '' : 's'}.`);
+      void refresh();
+    } catch (err) {
+      notifyError(err);
+    }
+  }, [recommendable, upsert, refresh, notifyError]);
 
   const reopenIntake = useCallback(
     (assetId: string) => {
@@ -431,10 +469,17 @@ export default function App() {
                     fixedMapping={fixedMapping}
                     onFixedMapping={setFixedMapping}
                     starOverlayUrl={star.overlayUrl}
+                    live={livePreview ? { url: livePreview.preview_url as string, hasFixed: Boolean(livePreview.has_fixed_mapping) } : null}
                   />
                   <div className="under-viewer">
-                    <RunHistory runs={runs} currentId={displayedRun?.id ?? null} onSelect={(id) => setRunChoice((prev) => ({ ...prev, [primary.id]: id }))} />
-                    <ExportMenu run={displayedRun} batchRunIds={batchRunIds} onError={reportError} />
+                    <RunHistory runs={runs} currentId={displayedRun?.id ?? null} onSelect={(id) => setRunChoice((prev) => ({ ...prev, [primary.id]: id }))}
+                      sameSettings={Boolean(rec.recipe && displayedRun && !recipesDiffer(rec.recipe, displayedRun.recipe))}
+                      onUseSettings={(r) => {
+                        rec.resetTo(r.recipe);
+                        setAnnouncement(`Restored the settings of Run ${r.serial}.`);
+                      }} />
+                    <ExportMenu run={displayedRun} batchRunIds={batchRunIds} onError={reportError}
+                      cleanFrame={((runDetail?.applied?.decisions as Record<string, unknown> | undefined)?.clean_frame ?? null) as CleanFrame | null} />
                   </div>
                   <ResultNote asset={primary} run={displayedRun} />
                   <StackInfo asset={primary} />
@@ -492,6 +537,11 @@ export default function App() {
               star={{ on: star.on, loading: star.loading, result: star.result, onToggle: star.toggle }}
               onChangeState={() => primary && reopenIntake(primary.id)}
               onAssetUpdated={onAssetUpdated}
+              autoChoice={autoChoice}
+              live={{
+                on: liveOn === 'on', onToggle: (v) => setLiveOn(v ? 'on' : 'off'), status: live.status, current: live.current,
+                error: live.error, seconds: livePreview?.seconds ?? null,
+              }}
             />
           </div>
         )}
@@ -504,6 +554,7 @@ export default function App() {
           question={intake.question}
           onAnswer={answerIntake}
           onLater={laterIntake}
+          bulk={!forced && recommendable.some((r) => r.id === intake.asset.id) ? { count: recommendable.length, onApply: applyRecommended } : null}
         />
       )}
       {settingsOpen && (

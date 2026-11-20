@@ -101,8 +101,10 @@ The running version is shown in the top bar (for example `v1.1.0`) and under **S
 
 App data (originals' copies, previews, runs, exports, SQLite database) lives in `%LOCALAPPDATA%\EasyAstroEnhance`
 (override with `-DataDir` / `EASYASTRO_DATA_DIR`). **Settings → Clear local history** lists exactly what it removes; your
-own files elsewhere are never touched. Limits (env overrides): 20 files per batch (`EASYASTRO_MAX_FILES`), 512 MiB per file
-(`EASYASTRO_MAX_FILE_MB`), 100 megapixels (`EASYASTRO_MAX_MEGAPIXELS`).
+own files elsewhere are never touched. **Settings → Storage** shows how much space results use and can keep only the newest
+N results per image (default: keep all). Limits (env overrides): 20 files per batch (`EASYASTRO_MAX_FILES`), 512 MiB per file
+(`EASYASTRO_MAX_FILE_MB`), 100 megapixels (`EASYASTRO_MAX_MEGAPIXELS`). CPU processing uses up to 8 threads;
+`EASYASTRO_CPU_THREADS` caps it (for example `2` on a shared or low-memory PC).
 
 ## 4. Test
 
@@ -152,32 +154,51 @@ frontend/ (React + TypeScript + Vite)         backend/app/
 * Results are written to `runs/<id>.partial`, validated (dimensions, finite values, PNG round-trip) and published with an
   atomic rename. Identical settings reuse the cached run (cache key: source SHA-256, engine + dependency versions,
   canonical recipe, per-file regions/background model, backend, precision); **Reprocess** always makes a new run.
+  The exports of a run are written in parallel; the 16-bit display TIFF is made on first download (or for a ZIP) from
+  the run's stored 16-bit display values, so its pixels are identical, and its size and SHA-256 are then added to the run.
+* On the CPU, the pixel stages run on parallel tiles whose overlap covers every chained filter, so the result is
+  bit-for-bit the same as one full-frame pass; independent analysis steps also run in parallel.
 
-### Processing method disclosure (engine 1.5.0, recipe schema 8 — one-button Enhance)
+### Processing method disclosure (engine 1.6.0, recipe schema 9 — one-button Enhance)
 
-Pick a **preset** (Natural, Vivid, Faint detail, Bright core (HDR), Star field, Seestar match), press **Enhance**.
-Six sliders (Background, Stretch, Contrast/Pop, Color, Detail, Noise reduction) and a *Protect bright cores* switch tune
-the result; everything else is measured from the image and recorded. The method follows the free tools Seestar owners
+Press **Enhance**. The default preset, **Auto**, measures each image (a bright extended core, faint extended signal,
+star density) on a small binned copy and applies one of the built-in looks — Bright core (HDR), Faint detail, Star
+field or Natural; the choice and its reasons are shown above the sliders and recorded in the report (the object's name
+is never used). You can also pick a **preset** yourself (Natural, Vivid, Faint detail, Bright core (HDR), Star field,
+Seestar match) or click **Preview presets on this image** for reduced-size quick looks of each. The panel opens in a
+**Simple** view (Sky brightness, Stretch, Noise reduction); **All controls** adds Contrast/Pop, Color, Detail, **Star
+color** and a *Protect bright cores* switch plus the tools below. Moving a Look slider makes the settings your own
+(Custom). After a first result, changed settings are shown as a **Live preview (not saved)** in the viewer; **Save this
+result** stores exactly that preview as a new run, and **Use these settings** in the result history brings back the
+settings of an earlier result. Everything else is measured from the image and recorded. The method follows the free tools Seestar owners
 use (Siril, GraXpert's classical background tools, VeraLux HyperMetric Stretch, AstroWizard), using only their
 classical algorithms — see [improve-enhance.md](improve-enhance.md). No 8-bit conversion exists for TIFF/FITS.
 
 * **Linear (stacked TIFF/FITS confirmed “Linear stack”)** — two pixel groups with analysis in between:
-  1. *Linear clean-up* (processed-linear array saved after this): optional supervised background → automatic
+  1. *Linear clean-up* (processed-linear array saved after this): **hot/cold pixel repair** (isolated one-pixel defects
+     on faint background: a spike in one colour channel only, or a pixel far below all its neighbours; one-pixel spikes
+     in every channel may be stars and are never touched) → optional supervised background → automatic
      low-order **gradient** model (robust polynomial on sky boxes; skipped with a reason when the target fills the
      frame or the gradient is negligible) → **background neutralization** (per-channel sky offset to one shared
      pedestal — an offset per channel, never a per-channel scale) → bounded **white balance from field stars**
-     (median color of isolated, unsaturated stars; gains limited to ±25 %; skipped when unreliable; not photometric
+     (median color of isolated, unsaturated stars; gains limited to ±25 %; skipped when unreliable, and for
+     H-alpha/OIII dual-band stacks such as Seestar LP, whose stars are not white through the filter; not photometric
      calibration) → optional **Richardson–Lucy deconvolution** (Advanced, off by default; star-measured Gaussian PSF,
      damped, SNR-gated, star cores excluded) → **à trous wavelet noise reduction** (luminance + chroma, per-scale
      measured noise, structure/star/defect gated, coarse residual untouched).
   2. *Display*: **hyperbolic luminance stretch** `Ls = (asinh(D·L+b) − asinh(b)) / (asinh(D+b) − asinh(b))` with
      highlight convergence (bright cores fade to white instead of clipping), white point at the data maximum, D
      auto-solved so the brightest extended signal lands at 0.88 (0.96 with core protection off), then an MTF that puts
-     the sky exactly on the Background level → gentler stretch inside confident star masks → HDR core compression
-     (only when a bright extended core is found) → SCNR green removal (only when green remains) → pop S-curve →
-     manual tone → multiscale **detail** (noise- and edge-gated) → protected saturation.
+     the sky exactly on the Sky brightness level → gentler stretch inside confident star masks → HDR core compression
+     (only when a bright extended core is found) → pop S-curve → manual tone → multiscale **detail** (noise- and
+     edge-gated) → SCNR green removal (only when green remains; never for dual-band stacks, where green carries OIII)
+     → protected saturation → **star color** (saturation of the existing colour inside the star mask only) → **star
+     colour fringe reduction** (only when bright stars have a blue/violet ring measurably stronger than a wider ring
+     around them; lowers that hue's saturation in the ring, keeping brightness).
+  The linear stage is cached for the current image, so a display-only change (Look sliders, tone, colour) reruns only
+  the display stage — with the same result as a fresh run.
 * **Rendered (JPEG; display-referred TIFF/FITS):** background neutralization → wavelet noise reduction → rational
-  midtone gain + MTF toward the Background level (limited to 0.6–1.6× of the image's own sky) → star protection →
+  midtone gain + MTF toward the Sky brightness level (limited to 0.6–1.6× of the image's own sky) → star protection →
   the same finishing tail.
 * The **Original** for linear data is a frozen *linked* autostretch (STF style, sky at 0.15) derived once per asset, so
   the source's own color cast stays visible in the comparison.
@@ -188,8 +209,11 @@ classical algorithms — see [improve-enhance.md](improve-enhance.md). No 8-bit 
 * **Guardrail:** new black/white clipping (per-pixel transitions vs the original display; pixels already clipped in any
   channel of the original are not new) above 0.1 % halves the finishing strengths once and reruns; if still above, the
   result is flagged “review”.
-* **Not implemented by design:** generative processing, AI sharpening/deconvolution, blind plate
-  solving, and cubes.
+* **Not implemented by design:** generative processing, super-resolution, blind (hint-free) plate solving, and cubes.
+  *Approved but not yet implemented* (spec amendment 1.7, all new features): header-WCS verification and hinted plate
+  solving with built-in catalog colour, object annotations in Edit export, a new **AI sharpening** tool, Star size and
+  Starless/Stars layer exports. The three existing AI tools (background extraction, noise reduction, star separation
+  with Star brightness) are already available; see [AI tools (optional)](#ai-tools-optional).
 
 ### Optional color and stretch tools
 
@@ -216,8 +240,8 @@ opening any of them. Saved presets from recipe schemas 3–5 migrate with newly 
   insufficient, the report says why and the normal field-star white balance still runs if enabled. No network is
   used. Imported CSVs (up to 2 MiB) stay in the app's `color-catalogs` directory; presets reference them by SHA-256.
 * **Stretch method → Manual focus:** for linear data, pick the part of the brightness range where the stretch
-  is strongest and tune its strength. Shadow and highlight color protection are separate options. Sky brightness is
-  still anchored to **Background**. Run Enhance and compare with an earlier run; **Automatic** is still the default.
+  is strongest and tune its strength. Shadow and highlight color protection are separate options. The sky level is
+  still anchored to **Sky brightness**. Run Enhance and compare with an earlier run; **Automatic** is still the default.
 * **Combine channels…:** add and confirm your FITS masters as linear, then choose RGB, LRGB, HOO, SHO, SHO from
   two dual-band stacks, or Ha into broadband red. Assign each master to its role and optionally scale it. The
   first input defines the output grid; mismatched solved inputs are resampled using their sky coordinates.
@@ -272,8 +296,11 @@ clipping transitions, noise estimate (with its limitations), backend/device/tran
 
 ### Stacking (Stack frames…)
 
-Use **Stack frames…** (top bar, or the start screen) and paste a folder path, for example `D:\Seestar\MyWorks\M 42_sub`
-(File Explorer: right-click the folder → *Copy as path*). **Scan folder** shows what was found; **Start stacking** runs
+Use **Stack frames…** (top bar, or the start screen) and click **Browse…** to pick the folder — the list shows drives,
+common folders, recently stacked folders and the other `…_sub` folders next to them, with their FITS counts — or paste a
+folder path, for example `D:\Seestar\MyWorks\M 42_sub`
+(File Explorer: right-click the folder → *Copy as path*). Browsing only lists folders; nothing is opened or changed.
+**Scan folder** shows what was found; **Start stacking** runs
 it in the background with a progress banner and Cancel. The folder is only read. The result is added as a new linear
 FITS image (`<target> - stacked N frames.fits`). It is **not** enhanced unless you tick *Enhance automatically when
 stacking finishes* (off by default), so you can look at it and adjust the settings first.
@@ -303,16 +330,21 @@ stacking finishes* (off by default), so you can look at it and adjust the settin
 | FITS | Astropy; scaling (BSCALE/BZERO) applied exactly once, originals recorded; BLANK/NaN masked (never dark stars); HDU selector; 2-D mono and documented 3-plane RGB; undocumented 3-plane shapes ask for confirmation; cubes/CFA get intake guidance. Rows flipped once for display and flipped back on export so WCS stays valid. |
 
 State prompt “**How was this image saved?** Linear stack / Already processed / I’m not sure” — “not sure” allows a
-labelled preview only; processing stays blocked. Exports: full-resolution PNG (8-bit for 8-bit sources, 16-bit
-otherwise), 16-bit TIFF, JPEG q95, comparison JPEG, processed float FITS (labelled *processed-linear* or
+labelled preview only; processing stays blocked. When the FITS header gives clear evidence (for example a ZWO Seestar
+stack's `INSTRUME` and `STACKCNT`, or `NCOMBINE`), the matching answer is marked **Recommended** with the reason, and
+**Use recommended answers for all N files** confirms them in one click; you still confirm, and nothing is inferred from
+the histogram. Exports: full-resolution PNG (8-bit for 8-bit sources, 16-bit
+otherwise), 16-bit TIFF (made when first downloaded), JPEG q95, comparison JPEG, processed float FITS (labelled *processed-linear* or
 *display-processed*; location/observer keywords removed unless you pick the explicit full-metadata FITS), report,
-summary, and Download all (ZIP with a folder per run and a batch summary).
+summary, and Download all (ZIP with a folder per run and a batch summary; shows progress and can be cancelled).
 
 ### Edited exports for sharing
 
 Select a finished result and choose **Edit export…** under the image. Rotate in 90° steps or use the angle slider to
 fine-tune. Zoom to crop and drag the preview (or use its arrow keys) to choose the framing. Fine rotations may leave
-black corners; zoom in to crop them. Zoom does not enlarge the exported pixels.
+black corners; zoom in to crop them. Zoom does not enlarge the exported pixels. For stacks with uneven edges (dithering,
+field rotation or mosaics), **Crop stacking edges** frames the largest clean area at the image's aspect ratio; it is
+only a suggestion and nothing is cropped unless you click it.
 
 Enter optional **Label text** for a name, company or caption. **Include target name** fills in the FITS `OBJECT`
 name when available, or lets you enter one manually. The text is imprinted in the lower-left corner of the new

@@ -24,12 +24,12 @@ def _spec_ids(key: str) -> list[str]:
 
 
 @router.get("/models")
-async def list_models(request: Request) -> dict[str, Any]:
+def list_models(request: Request) -> dict[str, Any]:
     return _mgr(request).overview()
 
 
 @router.post("/models/{key}/download", status_code=202)
-async def download(request: Request, key: str) -> dict[str, Any]:
+def download(request: Request, key: str) -> dict[str, Any]:
     """Accepts a model id or a tool name (background, denoise, stars) to fetch every model that tool needs."""
     mgr = _mgr(request)
     for mid in _spec_ids(key):
@@ -38,7 +38,7 @@ async def download(request: Request, key: str) -> dict[str, Any]:
 
 
 @router.post("/models/{key}/cancel")
-async def cancel(request: Request, key: str) -> dict[str, Any]:
+def cancel(request: Request, key: str) -> dict[str, Any]:
     mgr = _mgr(request)
     for mid in _spec_ids(key):
         mgr.cancel(mid)
@@ -46,7 +46,7 @@ async def cancel(request: Request, key: str) -> dict[str, Any]:
 
 
 @router.delete("/models/{key}")
-async def delete(request: Request, key: str) -> dict[str, Any]:
+def delete(request: Request, key: str) -> dict[str, Any]:
     mgr = _mgr(request)
     for mid in _spec_ids(key):
         mgr.delete(mid)

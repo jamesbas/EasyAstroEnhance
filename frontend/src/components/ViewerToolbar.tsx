@@ -55,9 +55,9 @@ export function ViewerToolbar(p: ViewerToolbarProps) {
         </label>
       )}
       {p.fixedAvailable && (
-        <label className="check small" title="Diagnostic: processed data shown with the original frozen display mapping">
+        <label className="check small" title="Diagnostic: the processed data shown with the original image's frozen display stretch">
           <input type="checkbox" checked={p.fixedMapping} onChange={(e) => p.onFixedMapping(e.target.checked)} data-testid="fixed-mapping" />
-          Fixed mapping
+          Original stretch
         </label>
       )}
       <span className="zoom-readout" aria-live="off">{Math.round(p.zoomPercent)}%</span>

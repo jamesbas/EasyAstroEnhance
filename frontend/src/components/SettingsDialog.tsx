@@ -150,6 +150,32 @@ function HistorySection({ busyJobs, onCleared }: { busyJobs: boolean; onCleared:
   );
 }
 
+const KEEP_CHOICES = [0, 1, 3, 5, 10, 20];
+
+function StorageSection({ keep, onKeep }: { keep: number; onKeep: (n: number) => void }) {
+  const [usage, setUsage] = useState<HistorySummary | null>(null);
+  useEffect(() => {
+    api.historySummary().then(setUsage, () => setUsage(null));
+  }, [keep]);
+  return (
+    <section className="settings-section" data-testid="storage-section">
+      <h3>Storage</h3>
+      {usage && (
+        <p className="small" data-testid="disk-usage">
+          Results and previews: {formatBytes(usage.bytes.results)} · Copies of added images: {formatBytes(usage.bytes.uploaded_originals_copies)} · ZIP exports: {formatBytes(usage.bytes.zip_exports)}
+        </p>
+      )}
+      <div className="field">
+        <label htmlFor="keep-runs">Results to keep per image</label>
+        <select id="keep-runs" value={keep} data-testid="keep-runs" onChange={(e) => onKeep(Number(e.target.value))}>
+          {KEEP_CHOICES.map((n) => <option key={n} value={n}>{n === 0 ? 'All results' : `Newest ${n}`}</option>)}
+        </select>
+      </div>
+      <p className="muted small">When an image gets a new result, older results beyond this number are deleted from the app&apos;s data folder. The image&apos;s current result is always kept. Your original files are never touched.</p>
+    </section>
+  );
+}
+
 export function SettingsDialog({ onClose, onCompute, onHistoryCleared, busyJobs, version, aiModels }: SettingsDialogProps) {
   const toasts = useToasts();
   const { error: notifyError } = toasts;
@@ -252,6 +278,11 @@ export function SettingsDialog({ onClose, onCompute, onHistoryCleared, busyJobs,
           </section>
 
           <AIModelsSection models={aiModels} />
+
+          <StorageSection
+            keep={settings.keep_runs_per_image}
+            onKeep={(n) => api.patchSettings({ keep_runs_per_image: n }).then(apply, (err) => toasts.error(err))}
+          />
 
           <HistorySection busyJobs={busyJobs} onCleared={onHistoryCleared} />
 

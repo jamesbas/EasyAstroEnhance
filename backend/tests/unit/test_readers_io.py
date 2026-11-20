@@ -223,6 +223,34 @@ def test_unknown_state_blocks_processing_but_allows_labeled_preview(tmp_path):
     assert unsure["status"] == "needs_input" and unsure["can_preview"] and not unsure["can_process"] and "Preview only" in unsure["message"]
 
 
+def _planes(path, **cards):
+    h = fits.PrimaryHDU(np.ones((3, 10, 12), np.uint16))
+    for k, v in cards.items():
+        h.header[k] = v
+    h.writeto(path)
+    return inspect_file(path, LIMIT)
+
+
+def test_intake_recommendations_come_from_header_evidence_only(tmp_path):
+    seestar = _planes(tmp_path / "seestar.fits", INSTRUME="Seestar S30", STACKCNT=232, BAYERPAT="GRBG")
+    qs = {q["id"]: q for q in evaluate_intake(seestar, {})["questions"]}
+    assert qs["layout"]["recommended"] == "rgb_planes" and "Seestar S30" in qs["layout"]["recommendation_reason"]
+    assert qs["state"]["recommended"] == "linear" and "232 frames" in qs["state"]["recommendation_reason"]
+    # a recommendation is never an answer: the file still needs confirmation
+    assert evaluate_intake(seestar, {})["can_process"] is False
+
+    stacked = _planes(tmp_path / "siril.fits", NCOMBINE=1)
+    st = next(q for q in evaluate_intake(stacked, {"layout": "rgb_planes"})["questions"] if q["id"] == "state")
+    assert st["recommended"] == "linear" and "1 frame was stacked" in st["recommendation_reason"]
+
+    shown = _planes(tmp_path / "eae.fits", EAEKIND="display-processed")
+    st = next(q for q in evaluate_intake(shown, {"layout": "rgb_planes"})["questions"] if q["id"] == "state")
+    assert st["recommended"] == "rendered"
+
+    plain = _planes(tmp_path / "plain.fits")
+    assert all("recommended" not in q for q in evaluate_intake(plain, {})["questions"])
+
+
 def test_fits_float_export_round_trip_and_header_hygiene(tmp_path):
     rng = np.random.default_rng(9)
     data = rng.normal(50, 5, (3, 24, 30)).astype(np.float32)

@@ -19,7 +19,7 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..db import new_id, now
-from ..models.api import BackgroundIn, InterpretationIn, RegionsIn
+from ..models.api import BackgroundIn, InterpretationIn, LivePreviewIn, PresetPreviewsIn, RegionsIn
 from ..processing.imagedata import ProcessingError
 from ..processing.catalog_color import MAX_BYTES, parse_catalog
 from ..processing.color import luminance
@@ -37,7 +37,7 @@ from .common import (
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 _EXT = {"jpeg": ".jpg", "tiff": ".tif", "fits": ".fits"}
-_SAFE_FILE = re.compile(r"^(bgprev-[0-9a-f]+-\d+\.jpg|starmask-[0-9a-f]+\.png|hdu-\d+\.jpg|thumb\.jpg)$")
+_SAFE_FILE = re.compile(r"^(bgprev-[0-9a-f]+-\d+\.jpg|starmask-[0-9a-f]+\.png|hdu-\d+\.jpg|thumb\.jpg|presetprev-[0-9a-f]{20}\.jpg)$")
 
 
 def clean_name(name: str | None) -> str:
@@ -47,16 +47,19 @@ def clean_name(name: str | None) -> str:
 
 
 async def _store_upload(request: Request, upload: UploadFile, asset_dir: Path) -> tuple[Path, str, int]:
-    """Stream an upload to disk, hashing as we go; enforce byte limit and free-space floor."""
+    """Stream an upload to disk, hashing as we go; enforce byte limit and free-space floor. The copy runs on a worker
+    thread so large files never block the event loop."""
     cfg = cfg_of(request)
     tmp = asset_dir / "upload.part"
     if shutil.disk_usage(asset_dir).free < cfg.min_free_bytes:
         raise ProcessingError("DISK_FULL", "The disk is nearly full; free some space and try again.")
-    h = hashlib.sha256()
-    size = 0
-    try:
+
+    def copy() -> tuple[str, int]:
+        h = hashlib.sha256()
+        size = 0
+        upload.file.seek(0)
         with open(tmp, "wb") as out:
-            while chunk := await upload.read(1024 * 1024):
+            while chunk := upload.file.read(1024 * 1024):
                 size += len(chunk)
                 if size > cfg.max_file_bytes:
                     raise ProcessingError("FILE_TOO_LARGE", f"This file is larger than the {cfg.max_file_bytes // (1024 * 1024)} MiB limit.")
@@ -64,6 +67,10 @@ async def _store_upload(request: Request, upload: UploadFile, asset_dir: Path) -
                 out.write(chunk)
                 if size % (64 * 1024 * 1024) < 1024 * 1024 and shutil.disk_usage(asset_dir).free < cfg.min_free_bytes:
                     raise ProcessingError("DISK_FULL", "The disk is nearly full; free some space and try again.")
+        return h.hexdigest(), size
+
+    try:
+        digest, size = await run_in_threadpool(copy)
     except OSError as exc:
         tmp.unlink(missing_ok=True)
         if exc.errno == errno.ENOSPC:
@@ -72,7 +79,7 @@ async def _store_upload(request: Request, upload: UploadFile, asset_dir: Path) -
     except ProcessingError:
         tmp.unlink(missing_ok=True)
         raise
-    return tmp, h.hexdigest(), size
+    return tmp, digest, size
 
 
 @router.post("")
@@ -119,7 +126,7 @@ async def upload_assets(request: Request, files: list[UploadFile]) -> dict[str, 
 
 
 @router.get("")
-async def list_assets(request: Request) -> dict[str, Any]:
+def list_assets(request: Request) -> dict[str, Any]:
     db, coord, cfg = db_of(request), coord_of(request), cfg_of(request)
     rows = db.all("SELECT * FROM assets ORDER BY created_at")
     return {"assets": [serialize_asset(db, coord, cfg, a) for a in rows]}
@@ -244,12 +251,12 @@ async def preview_object_color(request: Request, asset_id: str, body: ObjectColo
 
 
 @router.get("/{asset_id}")
-async def get_asset_detail(request: Request, asset_id: str) -> dict[str, Any]:
+def get_asset_detail(request: Request, asset_id: str) -> dict[str, Any]:
     return serialize_asset(db_of(request), coord_of(request), cfg_of(request), get_asset(request, asset_id))
 
 
 @router.patch("/{asset_id}/interpretation")
-async def patch_interpretation(request: Request, asset_id: str, body: InterpretationIn) -> dict[str, Any]:
+def patch_interpretation(request: Request, asset_id: str, body: InterpretationIn) -> dict[str, Any]:
     db, coord, cfg = db_of(request), coord_of(request), cfg_of(request)
     a = get_asset(request, asset_id)
     if a["status"] == "failed" or not a["inspection"]:
@@ -286,7 +293,7 @@ async def patch_interpretation(request: Request, asset_id: str, body: Interpreta
 
 
 @router.put("/{asset_id}/regions")
-async def put_regions(request: Request, asset_id: str, body: RegionsIn) -> dict[str, Any]:
+def put_regions(request: Request, asset_id: str, body: RegionsIn) -> dict[str, Any]:
     a = get_asset(request, asset_id)
     prepared = a.get("prepared") or {}
     if not prepared.get("width"):
@@ -300,11 +307,13 @@ async def put_regions(request: Request, asset_id: str, body: RegionsIn) -> dict[
 
 
 @router.delete("/{asset_id}")
-async def delete_asset(request: Request, asset_id: str) -> dict[str, Any]:
+def delete_asset(request: Request, asset_id: str) -> dict[str, Any]:
     db, cfg = db_of(request), cfg_of(request)
     get_asset(request, asset_id)
     if db.one("SELECT 1 AS x FROM job_items WHERE asset_id=? AND state='running'", (asset_id,)):
         raise ApiError(409, "ASSET_BUSY", "This image is being processed. Cancel the job first.")
+    coord_of(request).cancel_live(asset_id)
+    coord_of(request).live_previews.pop(asset_id, None)
     runs = db.all("SELECT id FROM runs WHERE asset_id=?", (asset_id,))
     for r in runs:
         shutil.rmtree(cfg.runs_dir / r["id"], ignore_errors=True)
@@ -314,13 +323,14 @@ async def delete_asset(request: Request, asset_id: str) -> dict[str, Any]:
     for f in asset_dir.glob("original*"):
         f.chmod(stat.S_IWRITE | stat.S_IREAD)
     shutil.rmtree(asset_dir, ignore_errors=True)
+    shutil.rmtree(cfg.tmp_dir / "live" / asset_id, ignore_errors=True)
     db.execute("DELETE FROM assets WHERE id=?", (asset_id,))
     return {"deleted": asset_id, "note": "Only app-owned copies were removed; your original files elsewhere are untouched."}
 
 
 # ------------------------------------------------------------------------------------------ images
 @router.get("/{asset_id}/thumb")
-async def thumb(request: Request, asset_id: str):
+def thumb(request: Request, asset_id: str):
     p = cfg_of(request).assets_dir / asset_id / "thumb.jpg"
     if not p.exists():
         raise ApiError(404, "NOT_FOUND", "No thumbnail yet.")
@@ -328,7 +338,7 @@ async def thumb(request: Request, asset_id: str):
 
 
 @router.get("/{asset_id}/files/{name}")
-async def asset_file(request: Request, asset_id: str, name: str):
+def asset_file(request: Request, asset_id: str, name: str):
     if not _SAFE_FILE.match(name):
         raise ApiError(404, "NOT_FOUND", "Unknown file.")
     p = cfg_of(request).assets_dir / asset_id / name
@@ -352,7 +362,61 @@ async def preview(request: Request, asset_id: str, x: int | None = None, y: int 
     return Response(data, media_type=media, headers=headers)
 
 
-# ------------------------------------------------------------------------------------------ analysis
+# ------------------------------------------------------------------------------------------ live preview
+_LIVE_ID = re.compile(r"^lp_[0-9a-zA-Z_-]+$")
+
+
+def _live_view(asset_id: str, st: dict[str, Any] | None) -> dict[str, Any]:
+    if not st:
+        return {"state": "none"}
+    res = st.get("result") or {}
+    url = f"/api/v1/assets/{asset_id}/live-preview/{st['id']}" if st["state"] == "ready" else None
+    return {
+        "id": st["id"], "state": st["state"], "stage": st.get("stage"), "error": st.get("error"), "recipe": st["recipe"],
+        "summary": res.get("summary"), "operations": res.get("operations", []), "needs_review": res.get("needs_review"),
+        "seconds": res.get("seconds"), "reused": res.get("reused"), "auto_preset": res.get("auto_preset"),
+        "preview_url": url, "has_fixed_mapping": bool(res.get("has_fixed")),
+    }
+
+
+@router.post("/{asset_id}/live-preview", status_code=202)
+def start_live_preview(request: Request, asset_id: str, body: LivePreviewIn) -> dict[str, Any]:
+    """Preview the enhancement for the current settings at full resolution without saving a result (latest request wins)."""
+    from .common import settings_snapshot
+
+    a = get_asset(request, asset_id)
+    _require_ready(a)
+    if not a.get("original_name"):
+        raise ApiError(409, "NOT_READY", "This image is not ready yet.")
+    st = coord_of(request).request_live(a, body.recipe.model_dump(), settings_snapshot(db_of(request), cfg_of(request)))
+    return _live_view(asset_id, st)
+
+
+@router.get("/{asset_id}/live-preview")
+def live_preview_status(request: Request, asset_id: str) -> dict[str, Any]:
+    get_asset(request, asset_id)
+    return _live_view(asset_id, coord_of(request).live_previews.get(asset_id))
+
+
+@router.delete("/{asset_id}/live-preview")
+def cancel_live_preview(request: Request, asset_id: str) -> dict[str, Any]:
+    coord_of(request).cancel_live(asset_id)
+    return {"cancelled": True}
+
+
+@router.get("/{asset_id}/live-preview/{live_id}")
+async def live_preview_image(request: Request, asset_id: str, live_id: str, variant: str = "enhanced", x: int | None = None,
+                             y: int | None = None, w: int | None = None, h: int | None = None, max_edge: int = 2048):
+    get_asset(request, asset_id)
+    if not _LIVE_ID.match(live_id) or variant not in ("enhanced", "fixed"):
+        raise ApiError(404, "NOT_FOUND", "Unknown preview.")
+    path = cfg_of(request).tmp_dir / "live" / asset_id / (f"{live_id}.npy" if variant == "enhanced" else f"{live_id}-fixed.npy")
+    roi = (x, y, w, h) if None not in (x, y, w, h) else None
+    try:
+        data, headers, media = await run_in_threadpool(previews.render, path, roi, max(256, min(max_edge, 2048)))
+    except ProcessingError as exc:
+        raise ApiError(404, exc.code, "This preview is no longer available; it was replaced by a newer one.") from exc
+    return Response(data, media_type=media, headers=headers)
 def _analysis_payload(cfg, a: dict[str, Any]) -> dict[str, Any]:
     d = cfg.assets_dir / a["id"]
     return {
@@ -368,6 +432,20 @@ def _analysis_payload(cfg, a: dict[str, Any]) -> dict[str, Any]:
 def _require_ready(a: dict[str, Any]) -> None:
     if a["status"] != "ready":
         raise ApiError(409, "NOT_READY", "Confirm how this image was saved before using this feature.")
+
+
+@router.post("/{asset_id}/preset-previews")
+async def preset_previews(request: Request, asset_id: str, body: PresetPreviewsIn) -> dict[str, Any]:
+    """Quick-look thumbnails of this image with each given preset recipe (rendered on a ~1 MP block-averaged copy)."""
+    a = get_asset(request, asset_id)
+    _require_ready(a)
+    payload = {**_analysis_payload(cfg_of(request), a), "items": [{"id": i.id, "recipe": i.recipe.model_dump()} for i in body.items]}
+    res = await run_worker_task(request, "preset_previews", payload, timeout=600)
+    return {
+        "items": [{**i, "url": f"/api/v1/assets/{asset_id}/files/{i['file']}"} for i in res["items"]],
+        "scale_factor": res["factor"],
+        "note": "Quick look at reduced size; the full-resolution result can differ slightly.",
+    }
 
 
 @router.get("/{asset_id}/background/suggest")

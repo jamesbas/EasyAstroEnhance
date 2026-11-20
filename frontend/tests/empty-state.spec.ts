@@ -35,6 +35,13 @@ test.describe('empty state', () => {
     await page.getByTestId('check-gpu').click();
     await expect(page.getByTestId('probe-details')).toBeVisible({ timeout: 60_000 });
     await expect(dialog.getByText('Remove location/observer details from shared exports')).toBeVisible();
+    await expect(page.getByTestId('disk-usage')).toContainText('Results and previews');
+    const keep = page.getByTestId('keep-runs');
+    await expect(keep).toHaveValue('0');
+    await keep.selectOption('3');
+    await expect(keep).toHaveValue('3');
+    await keep.selectOption('0');
+    await expect(keep).toHaveValue('0');
     const shown = await page.getByTestId('app-version').innerText();
     await expect(page.getByTestId('about-version')).toHaveText(shown);
     await expect(page.getByTestId('about-section')).toContainText('recipe schema');

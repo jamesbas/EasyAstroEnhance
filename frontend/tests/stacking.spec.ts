@@ -21,7 +21,10 @@ test.describe('stacking', () => {
     await page.getByTestId('stack-scan').click();
     await expect(page.getByTestId('stack-error')).toContainText('full folder path');
     await page.getByTestId('stack-folder').fill(STACK_DIR as string);
-    await page.getByTestId('stack-scan').click();
+    await page.getByTestId('stack-browse').click();
+    await expect(page.getByTestId('folder-browser')).toContainText('6 FITS files in this folder');
+    await page.getByTestId('folder-use-current').click();
+    await expect(page.getByTestId('folder-browser')).toHaveCount(0);
     await expect(page.getByTestId('stack-summary')).toContainText('6 sub-frames');
     await expect(page.getByTestId('stack-summary')).toContainText('hot pixels are still removed automatically');
     await expect(page.getByTestId('stack-auto-enhance')).not.toBeChecked();  // default: look and adjust first
@@ -35,6 +38,12 @@ test.describe('stacking', () => {
     await expect(page.getByTestId('stack-banner')).toBeHidden();
     await expect(page.getByTestId('enhance-selected')).toBeEnabled();
     await expect(page.getByTestId('stack-info')).toContainText('Stacked 6 of 6 frames');
+    // The stacked folder is offered again next time.
+    await page.getByTestId('stack-button').click();
+    await page.getByTestId('stack-folder').fill('');
+    await page.getByTestId('stack-browse').click();
+    await expect(page.getByTestId('folder-browser')).toContainText('Recently stacked');
+    await expect(page.getByTestId('folder-browser')).toContainText('6 FITS');
     // The deliberate relative-path scan above answers 422, which the browser logs as a failed resource load.
     expect(errors.filter((e) => !e.includes('status of 422'))).toEqual([]);
   });

@@ -1,13 +1,14 @@
 import { expect, test } from '@playwright/test';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { collectConsoleErrors, resetBackend, uploadAndWaitReady } from './helpers';
+import { collectConsoleErrors, resetBackend, showAllControls, uploadAndWaitReady } from './helpers';
 
 const monoFits = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'mono-linear.fits');
 
 test.describe('AI tools', () => {
-  test.beforeEach(async ({ request }) => {
+  test.beforeEach(async ({ page, request }) => {
     await resetBackend(request);
+    await showAllControls(page);
   });
 
   test('opt-in switches show model status, survive preset changes and are listed in Settings', async ({ page }) => {

@@ -88,6 +88,7 @@ class ComputePatch(BaseModel):
 class SettingsPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     strip_location: bool | None = None
+    keep_runs_per_image: int | None = Field(None, ge=0, le=50)
 
 
 class BatchExportIn(BaseModel):
@@ -105,6 +106,27 @@ class EditExportIn(BaseModel):
     target: str = Field(default="", max_length=80)
     label: str = Field(default="", max_length=120)
     format: Literal["png", "jpeg"] = "png"
+
+
+class PresetPreviewItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=1, max_length=80)
+    recipe: Recipe
+
+
+class PresetPreviewsIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    items: list[PresetPreviewItem] = Field(min_length=1, max_length=16)
+
+
+class FolderBrowseIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str | None = Field(default=None, max_length=500)
+
+
+class LivePreviewIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    recipe: Recipe
 
 
 class ConfirmIn(BaseModel):

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, fullMetadataFitsUrl, readableError } from '../api/client';
-import type { BatchIncludeKind, Run } from '../api/types';
+import type { BatchIncludeKind, CleanFrame, Run } from '../api/types';
 import { formatBytes } from '../lib/format';
 import { EditExportDialog } from './EditExportDialog';
 
@@ -8,6 +8,7 @@ interface ExportMenuProps {
   run: Run | null;
   batchRunIds: string[];
   onError: (err: unknown) => void;
+  cleanFrame?: CleanFrame | null;
 }
 
 const EXTRA_KINDS: { kind: BatchIncludeKind; label: string }[] = [
@@ -18,7 +19,10 @@ const EXTRA_KINDS: { kind: BatchIncludeKind; label: string }[] = [
   { kind: 'linear-tiff', label: 'Linear TIFF' },
 ];
 
-type ZipState = { phase: 'idle' } | { phase: 'building'; done: number; total: number } | { phase: 'error'; message: string };
+type ZipState =
+  | { phase: 'idle' }
+  | { phase: 'building'; id: string | null; done: number; total: number; cancelling?: boolean }
+  | { phase: 'error'; message: string };
 
 function triggerDownload(url: string): void {
   const a = document.createElement('a');
@@ -29,7 +33,7 @@ function triggerDownload(url: string): void {
   a.remove();
 }
 
-export function ExportMenu({ run, batchRunIds, onError }: ExportMenuProps) {
+export function ExportMenu({ run, batchRunIds, onError, cleanFrame }: ExportMenuProps) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [include, setInclude] = useState<BatchIncludeKind[]>([]);
@@ -60,9 +64,10 @@ export function ExportMenu({ run, batchRunIds, onError }: ExportMenuProps) {
   const hasFits = run?.exports.some((e) => e.kind === 'fits') ?? false;
 
   const downloadAll = async () => {
-    setZip({ phase: 'building', done: 0, total: batchRunIds.length });
+    setZip({ phase: 'building', id: null, done: 0, total: batchRunIds.length });
     try {
       const started = await api.startBatchExport(batchRunIds, include);
+      setZip({ phase: 'building', id: started.id, done: 0, total: batchRunIds.length });
       for (let attempt = 0; attempt < 600; attempt++) {
         await new Promise((r) => window.setTimeout(r, 700));
         if (cancelled.current) return;
@@ -72,12 +77,27 @@ export function ExportMenu({ run, batchRunIds, onError }: ExportMenuProps) {
           triggerDownload(st.download_url);
           return;
         }
+        if (st.state === 'cancelled') {
+          setZip({ phase: 'idle' });
+          return;
+        }
         if (st.state === 'failed') throw new Error(st.detail?.error?.message ?? 'The ZIP file could not be created.');
-        setZip({ phase: 'building', done: st.detail?.done ?? 0, total: st.detail?.total ?? batchRunIds.length });
+        setZip((z) => ({ phase: 'building', id: started.id, done: st.detail?.done ?? 0, total: st.detail?.total ?? batchRunIds.length,
+          cancelling: z.phase === 'building' && z.cancelling }));
       }
       throw new Error('Building the ZIP is taking too long. Try again with fewer results.');
     } catch (err) {
       setZip({ phase: 'error', message: readableError(err) });
+      onError(err);
+    }
+  };
+
+  const cancelZip = async () => {
+    if (zip.phase !== 'building' || !zip.id) return;
+    setZip({ ...zip, cancelling: true });
+    try {
+      await api.cancelExport(zip.id);
+    } catch (err) {
       onError(err);
     }
   };
@@ -90,7 +110,7 @@ export function ExportMenu({ run, batchRunIds, onError }: ExportMenuProps) {
         <button type="button" className="btn primary" disabled data-testid="download-png">Download PNG</button>
       )}
       <button type="button" className="btn" disabled={!run} onClick={() => setEditing(true)}>Edit export…</button>
-      {editing && run && <EditExportDialog key={run.id} runId={run.id} onClose={() => setEditing(false)} />}
+      {editing && run && <EditExportDialog key={run.id} runId={run.id} cleanFrame={cleanFrame ?? null} onClose={() => setEditing(false)} />}
       <div className="menu-wrap">
         <button type="button" className="btn" disabled={!run} aria-haspopup="true" aria-expanded={open} onClick={() => setOpen((o) => !o)} data-testid="more-formats">
           More formats ▾
@@ -102,7 +122,7 @@ export function ExportMenu({ run, batchRunIds, onError }: ExportMenuProps) {
                 <li key={e.kind}>
                   <a href={e.url} download data-testid={`export-${e.kind}`}>
                     <span>{e.label}</span>
-                    <small>{formatBytes(e.bytes)}</small>
+                    <small>{e.bytes === null ? 'made when downloaded' : formatBytes(e.bytes)}</small>
                   </a>
                 </li>
               ))}
@@ -143,7 +163,11 @@ export function ExportMenu({ run, batchRunIds, onError }: ExportMenuProps) {
         Download all ({batchRunIds.length})
       </button>
       {zip.phase === 'building' && (
-        <span className="muted small" role="status" data-testid="zip-progress">Preparing ZIP… {zip.total > 0 ? `${zip.done} of ${zip.total} results` : ''}</span>
+        <span className="zip-progress small" role="status" data-testid="zip-progress">
+          <span className="muted">{zip.cancelling ? 'Cancelling…' : `Preparing ZIP… ${zip.total > 0 ? `${zip.done} of ${zip.total} results` : ''}`}</span>
+          <progress max={Math.max(1, zip.total)} value={zip.done} aria-label="ZIP progress" />
+          <button type="button" className="btn tiny" disabled={!zip.id || zip.cancelling} onClick={() => void cancelZip()} data-testid="zip-cancel">Cancel</button>
+        </span>
       )}
       {zip.phase === 'error' && <span className="err-text small" role="alert">{zip.message}</span>}
     </div>

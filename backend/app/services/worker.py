@@ -12,6 +12,7 @@ import os
 import shutil
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -300,6 +301,10 @@ def _linear_history(report: dict[str, Any]) -> list[str]:
     ops = {o["name"]: o for o in report.get("operations", [])}
     scale = ((report.get("source") or {}).get("normalization") or {}).get("scale") or 1.0
     lines: list[str] = []
+    cos = ops.get("cosmetic") or {}
+    if cos.get("status") == "applied":
+        p = cos.get("parameters") or {}
+        lines.append(f"Cosmetic correction: {p.get('hot_colored', 0)} colored hot, {p.get('cold', 0)} cold pixels repaired.")
     if (ops.get("gradient") or {}).get("status") == "applied":
         lines.append("Automatic polynomial gradient model subtracted.")
     n = ops.get("neutralize") or {}
@@ -328,6 +333,126 @@ def _linear_history(report: dict[str, Any]) -> list[str]:
     return lines
 
 
+# ----------------------------------------------------------------------------------------------- enhance helpers
+# Worker-process caches: the linear stage of recent recipes (so display-only changes rerun only the display stage) and
+# the most recent complete result (so Enhance right after a live preview with the same settings reuses it). Both give
+# exactly the values a fresh run gives; the processing report records the reuse.
+_CACHE: dict[str, Any] = {"stages": None, "result_key": None, "result": None}
+
+
+def _stage_cache():
+    if _CACHE["stages"] is None:
+        import psutil
+
+        from ..processing.pipeline import StageCache
+
+        _CACHE["stages"] = StageCache(max_entries=2, max_bytes=int(psutil.virtual_memory().total * 0.2))
+    return _CACHE["stages"]
+
+
+def clear_caches() -> None:
+    if _CACHE["stages"] is not None:
+        _CACHE["stages"].clear()
+    _CACHE["result_key"] = _CACHE["result"] = None
+    import gc
+
+    gc.collect()
+
+
+def _memory_check(cfg: Config, asset: dict[str, Any], settings: dict[str, Any]) -> None:
+    import psutil
+
+    insp = asset["inspection"]
+    state_guess = (asset["interpretation"] or {}).get("state")
+    need = estimate_peak_ram_bytes(
+        insp["height"], insp["width"], 3 if insp.get("channel_layout") == "rgb" else 1, "linear" if state_guess == "linear" else "rendered"
+    )
+
+    def budget() -> int:
+        return int(psutil.virtual_memory().available * float(settings.get("ram_fraction", cfg.ram_fraction)))
+
+    if need > budget():
+        clear_caches()  # cached stages of other images may hold the memory this one needs
+    if need > (b := budget()):
+        raise ProcessingError(
+            "INSUFFICIENT_MEMORY",
+            f"Processing this {insp['width'] * insp['height'] / 1e6:.0f} MP image needs about {need / 1e9:.1f} GB of memory, but the "
+            f"configured budget is {b / 1e9:.1f} GB. Close other programs or raise the memory fraction in Settings; nothing was changed.",
+            f"estimate={need} budget={b}",
+        )
+
+
+def _execution_options(cfg: Config, settings: dict[str, Any], ctl, job_id: str | None) -> tuple[ExecutionOptions, dict[str, Any] | None, str]:
+    import psutil
+
+    device = "cpu" if cfg.cpu_only else settings.get("device", "auto")
+    gpu_ok = False
+    probe_info = None
+    if device != "cpu":
+        probe_info = ensure_probe()
+        gpu_ok = bool(probe_info.get("ok"))
+
+    def factory(name: str):
+        if name == "gpu":
+            free = None
+            try:
+                import cupy as cp  # noqa: F401  (only reached when the probe succeeded)
+
+                free = int(cp.cuda.runtime.memGetInfo()[0])
+            except Exception:
+                pass
+            limit = int(free * min(float(settings.get("gpu_memory_fraction", cfg.gpu_memory_fraction)), 0.7)) if free else None
+            return get_backend("gpu", limit)
+        return get_backend("cpu")
+
+    opts = ExecutionOptions(
+        device=device,
+        gpu_available=gpu_ok,
+        gpu_disabled=job_id is not None and job_id in _Gpu.disabled_jobs,
+        gpu_memory_fraction=min(float(settings.get("gpu_memory_fraction", cfg.gpu_memory_fraction)), 0.7),
+        ram_budget_bytes=int(psutil.virtual_memory().available * float(settings.get("ram_fraction", cfg.ram_fraction))),
+        gpu_threshold_pixels=int(settings.get("gpu_threshold_pixels", cfg.gpu_threshold_pixels)),
+        cpu_threads=cfg.cpu_threads or None,
+        cancel_check=ctl.check,
+        progress=ctl.progress,
+        backend_factory=factory,
+        ai_models_dir=cfg.ai_models_dir,
+        color_catalog_dir=cfg.color_catalog_dir,
+    )
+    return opts, probe_info, device
+
+
+def _asset_context(asset: dict[str, Any]) -> AssetContext:
+    bg = asset.get("background")
+    return AssetContext(
+        regions=asset.get("regions") or [],
+        background=bg if (bg and bg.get("confirmed")) else None,
+        frame=(asset.get("prepared") or {}).get("frame"),
+        dualband_confirmed=(asset.get("interpretation") or {}).get("dualband_confirmed") is True,
+    )
+
+
+def _enhance_cached(cfg: Config, image: ImageData, recipe, ctx: AssetContext, opts: ExecutionOptions):
+    import copy
+    from dataclasses import replace
+
+    from ..processing.pipeline import stage_key
+
+    key = stage_key(image, recipe, ctx, opts) + hashlib.sha256(json.dumps(recipe.model_dump(), sort_keys=True).encode()).hexdigest()
+    if _CACHE["result_key"] == key and _CACHE["result"] is not None:
+        res = _CACHE["result"]
+        report = copy.deepcopy(res.report)
+        report["linear_stage_cache"] = {
+            "reused": True, "display_reused": True, "key": key[:16],
+            "note": "This exact result was computed moments earlier (live preview) with the same image and settings and was reused.",
+        }
+        return replace(res, report=report)
+    res = run_pipeline(image, recipe, ctx, opts, cache=_stage_cache())
+    if not res.gpu_disabled and not res.report["execution"].get("fallbacks"):
+        _CACHE["result_key"], _CACHE["result"] = key, res
+    return res
+
+
 def handle_enhance(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
     asset = task["asset"]
     settings = task["settings"]
@@ -338,74 +463,21 @@ def handle_enhance(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
         shutil.rmtree(partial, ignore_errors=True)
 
     ctl.progress("Reading image")
-    insp_dims = asset["inspection"]
-    state_guess = (asset["interpretation"] or {}).get("state")
     import psutil
 
-    ram_budget = int(psutil.virtual_memory().available * float(settings.get("ram_fraction", cfg.ram_fraction)))
-    need = estimate_peak_ram_bytes(
-        insp_dims["height"], insp_dims["width"], 3 if insp_dims.get("channel_layout") == "rgb" else 1, "linear" if state_guess == "linear" else "rendered"
-    )
-    if need > ram_budget:
-        raise ProcessingError(
-            "INSUFFICIENT_MEMORY",
-            f"Processing this {insp_dims['width'] * insp_dims['height'] / 1e6:.0f} MP image needs about {need / 1e9:.1f} GB of memory, but the "
-            f"configured budget is {ram_budget / 1e9:.1f} GB. Close other programs or raise the memory fraction in Settings; nothing was changed.",
-            f"estimate={need} budget={ram_budget}",
-        )
+    _memory_check(cfg, asset, settings)
     image = load_image(cfg, asset)
     if (asset["interpretation"].get("state") or "") not in ("linear", "rendered") and asset["inspection"]["format"] != "jpeg":
         raise ProcessingError("STATE_NOT_CONFIRMED", "Confirm how this image was saved (linear stack or already processed) before enhancing it.")
     _disk_check(cfg, image.width * image.height, image.channels)
     partial.mkdir(parents=True, exist_ok=False)
     try:
-        # execution preferences
-        device = "cpu" if cfg.cpu_only else settings.get("device", "auto")
-        gpu_ok = False
-        probe_info = None
-        if device != "cpu":
-            probe_info = ensure_probe()
-            gpu_ok = bool(probe_info.get("ok"))
         job_id = task["job_id"]
-
-        def factory(name: str):
-            if name == "gpu":
-                free = None
-                try:
-                    import cupy as cp  # noqa: F401  (only reached when the probe succeeded)
-
-                    free = int(cp.cuda.runtime.memGetInfo()[0])
-                except Exception:
-                    pass
-                limit = int(free * min(float(settings.get("gpu_memory_fraction", cfg.gpu_memory_fraction)), 0.7)) if free else None
-                return get_backend("gpu", limit)
-            return get_backend("cpu")
-
-        import psutil
-
-        opts = ExecutionOptions(
-            device=device,
-            gpu_available=gpu_ok,
-            gpu_disabled=job_id in _Gpu.disabled_jobs,
-            gpu_memory_fraction=min(float(settings.get("gpu_memory_fraction", cfg.gpu_memory_fraction)), 0.7),
-            ram_budget_bytes=int(psutil.virtual_memory().available * float(settings.get("ram_fraction", cfg.ram_fraction))),
-            gpu_threshold_pixels=int(settings.get("gpu_threshold_pixels", cfg.gpu_threshold_pixels)),
-            cancel_check=ctl.check,
-            progress=ctl.progress,
-            backend_factory=factory,
-            ai_models_dir=cfg.ai_models_dir,
-            color_catalog_dir=cfg.color_catalog_dir,
-        )
-        bg = asset.get("background")
-        ctx = AssetContext(
-            regions=asset.get("regions") or [],
-            background=bg if (bg and bg.get("confirmed")) else None,
-            frame=(asset.get("prepared") or {}).get("frame"),
-            dualband_confirmed=asset["interpretation"].get("dualband_confirmed") is True,
-        )
+        opts, probe_info, device = _execution_options(cfg, settings, ctl, job_id)
+        ctx = _asset_context(asset)
         label_backend, _ = choose_backend(opts, image.height, image.width, image.channels)
         ctl.label("Processing: GPU + CPU" if label_backend == "gpu" else "Processing: CPU")
-        result = run_pipeline(image, recipe, ctx, opts)
+        result = _enhance_cached(cfg, image, recipe, ctx, opts)
         if result.gpu_disabled:
             _Gpu.disabled_jobs.add(job_id)
         ctl.label(
@@ -417,44 +489,54 @@ def handle_enhance(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
         if result.display.shape[:2] != (h, w) or not np.isfinite(result.display).all():
             raise ProcessingError("VALIDATION_FAILED", "The enhanced image failed validation and was not published.")
         bits = 8 if image.source_bit_depth <= 8 and image.source_format == "jpeg" else 16
-        files: dict[str, tuple[str, str]] = {}  # kind -> (filename, label)
-
-        def put(kind: str, name: str, label: str, writer) -> None:
-            ctl.check()
-            writer(partial / name)
-            files[kind] = (name, label)
-
-        put("png", "enhanced.png", f"Enhanced PNG ({bits}-bit sRGB, full resolution)", lambda p: exp.write_png(p, result.display, bits))
-        put("tiff", "enhanced-display.tif", "Enhanced display TIFF (16-bit)", lambda p: exp.write_tiff16(p, result.display))
-        put("jpeg", "enhanced.jpg", "Enhanced JPEG (quality 95, for sharing)", lambda p: exp.write_jpeg(p, result.display, 95))
+        # Fixed order (it is the order of the export list); the files are written concurrently. The 16-bit display TIFF
+        # is rendered on first request from display.npy, which holds exactly the values it encodes.
+        specs: list[tuple[str, str, str, Any]] = [
+            ("png", "enhanced.png", f"Enhanced PNG ({bits}-bit sRGB, full resolution)", lambda p: exp.write_png(p, result.display, bits)),
+            ("tiff", exp.DEFERRED_TIFF, "Enhanced display TIFF (16-bit)", None),
+            ("jpeg", "enhanced.jpg", "Enhanced JPEG (quality 95, for sharing)", lambda p: exp.write_jpeg(p, result.display, 95)),
+        ]
         left = "Original view" if image.domain == "display" else "Original shown with a display stretch"
-        put("comparison", "comparison.jpg", "Share-sized comparison JPEG", lambda p: exp.comparison_jpeg(p, result.baseline, result.display, left, "Enhanced"))
+        specs.append(("comparison", "comparison.jpg", "Share-sized comparison JPEG", lambda p: exp.comparison_jpeg(p, result.baseline, result.display, left, "Enhanced")))
 
         if image.source_format == "fits":
             strip = bool(settings.get("strip_location", True))
             if image.domain == "linear":
                 hist = _linear_history(result.report)
-                put("fits", "processed-linear.fits", "Processed linear FITS (no display-only operations)",
-                    lambda p: exp.write_fits(p, image, result.processed, "processed-linear", recipe.preset, strip, hist))
+                specs.append(("fits", "processed-linear.fits", "Processed linear FITS (no display-only operations)",
+                              lambda p: exp.write_fits(p, image, result.processed, "processed-linear", recipe.preset, strip, hist)))
             else:
-                put("fits", "display-processed.fits", "Display-processed FITS (not linear data)",
-                    lambda p: exp.write_fits(p, image, result.display, "display-processed", recipe.preset, strip))
+                specs.append(("fits", "display-processed.fits", "Display-processed FITS (not linear data)",
+                              lambda p: exp.write_fits(p, image, result.display, "display-processed", recipe.preset, strip)))
         elif image.source_format == "tiff" and image.domain == "linear":
             import tifffile
 
-            put("linear-tiff", "processed-linear.tif", "Processed linear TIFF (float, no display-only operations)",
-                lambda p: tifffile.imwrite(p, np.asarray(result.processed, dtype=np.float32), photometric="rgb" if result.processed.ndim == 3 else "minisblack", compression="zlib"))
+            specs.append(("linear-tiff", "processed-linear.tif", "Processed linear TIFF (float, no display-only operations)",
+                          lambda p: tifffile.imwrite(p, np.asarray(result.processed, dtype=np.float32), photometric="rgb" if result.processed.ndim == 3 else "minisblack", compression="zlib")))
 
         # viewer arrays (uint16 memmaps; 8-bit sources are represented exactly as value*257)
-        d16 = to_u16(result.display)
-        save_npy(partial / "display.npy", d16)
-        if result.display_fixed is not None:
-            save_npy(partial / "display_fixed.npy", to_u16(result.display_fixed))
+        def viewer_arrays(_p: Path) -> None:
+            save_npy(partial / "display.npy", to_u16(result.display))
+            if result.display_fixed is not None:
+                save_npy(partial / "display_fixed.npy", to_u16(result.display_fixed))
+
+        ctl.check()
+        jobs = [(name, writer) for _, name, _, writer in specs if writer is not None] + [("display.npy", viewer_arrays)]
+        with ThreadPoolExecutor(max_workers=len(jobs), thread_name_prefix="eae-export") as pool:
+            for f in [pool.submit(writer, partial / name) for name, writer in jobs]:
+                f.result()
+            ctl.check()
+            eager = [name for _, name, _, writer in specs if writer is not None]
+            hashes = dict(zip(eager, pool.map(lambda n: sha256_path(partial / n), eager)))
 
         # report + summary
         ex_list = []
-        for kind, (name, label) in files.items():
-            ex_list.append({"kind": kind, "filename": name, "label": label, "bytes": (partial / name).stat().st_size, "sha256": sha256_path(partial / name)})
+        for kind, name, label, writer in specs:
+            if writer is None:
+                ex_list.append({"kind": kind, "filename": name, "label": label, "bytes": None, "sha256": None, "deferred": True,
+                                "note": "Rendered on first request from display.npy (identical values); size and hash are recorded then."})
+            else:
+                ex_list.append({"kind": kind, "filename": name, "label": label, "bytes": (partial / name).stat().st_size, "sha256": hashes[name]})
         report = result.report
         full = {
             "schema": 1,
@@ -531,6 +613,108 @@ class _Ctl:
         self.q.put(("progress", self.task_id, {"label": label}))
 
 
+def handle_live(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
+    """A live preview: the full-resolution enhanced display for the current settings, without exports or a run record.
+    Uses the same pipeline and caches as Enhance, so the preview is exactly what Enhance would publish."""
+    asset = task["asset"]
+    settings = task["settings"]
+    recipe = parse_recipe(task["recipe"])
+    if (asset["interpretation"].get("state") or "") not in ("linear", "rendered") and asset["inspection"]["format"] != "jpeg":
+        raise ProcessingError("STATE_NOT_CONFIRMED", "Confirm how this image was saved before previewing an enhancement.")
+    ctl.progress("Reading image")
+    _memory_check(cfg, asset, settings)
+    image = load_image(cfg, asset)
+    opts, _, _ = _execution_options(cfg, settings, ctl, None)
+    result = _enhance_cached(cfg, image, recipe, _asset_context(asset), opts)
+    ctl.progress("Showing the preview")
+    out_dir = Path(task["out_dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    name = task["live_id"]
+    save_npy(out_dir / f"{name}.npy", to_u16(result.display))
+    if result.display_fixed is not None:
+        save_npy(out_dir / f"{name}-fixed.npy", to_u16(result.display_fixed))
+    for old in out_dir.glob("*.npy"):
+        if not old.name.startswith(name):
+            try:
+                old.unlink()
+            except OSError:  # still memory-mapped by a preview request; removed next time
+                pass
+    report = result.report
+    return {
+        "live_id": name, "summary": report["summary"], "needs_review": result.needs_review, "seconds": report["total_seconds"],
+        "operations": [{"name": o["name"], "status": o["status"], "reason": o["reason"]} for o in report["operations"]],
+        "reused": bool((report.get("linear_stage_cache") or {}).get("reused")), "has_fixed": result.display_fixed is not None,
+        "auto_preset": report.get("auto_preset"),
+    }
+
+
+def _proxy_image(image: ImageData, target_pixels: int = 1_000_000) -> tuple[ImageData, int]:
+    """A block-averaged copy of about ``target_pixels`` (linear values stay linear) for quick looks only."""
+    import math
+    from dataclasses import replace
+
+    from ..processing.auto_preset import _bin
+
+    f = max(1, math.ceil(math.sqrt(image.height * image.width / target_pixels)))
+    if f == 1:
+        return image, 1
+    px, valid = _bin(image.pixels, image.valid_mask, f)
+    if image.domain == "display":
+        px = np.clip(px, 0.0, 1.0)
+    return replace(image, pixels=px.astype(np.float32), valid_mask=valid, protected_mask=np.zeros(valid.shape, bool),
+                   source_hash=f"{image.source_hash}:proxy{f}", notes=[]), f
+
+
+def _scaled_rects(rects: list[dict[str, Any]], f: int, w: int, h: int) -> list[dict[str, int]]:
+    out = []
+    for r in rects or []:
+        x0, y0 = int(r["x"]) // f, int(r["y"]) // f
+        x1, y1 = min(w, -(-(int(r["x"]) + int(r["w"])) // f)), min(h, -(-(int(r["y"]) + int(r["h"])) // f))
+        if x1 > x0 and y1 > y0:
+            out.append({"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0})
+    return out
+
+
+def handle_preset_previews(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
+    """Small thumbnails of the image enhanced with each preset, rendered on a ~1 MP block-averaged copy (a quick look;
+    the full-resolution result can differ slightly). Presets with the same linear settings share the linear stage."""
+    from PIL import Image
+
+    from ..processing.pipeline import StageCache
+
+    asset = task["asset"]
+    out_dir = Path(task["asset_dir"])
+    image = load_image(cfg, asset)
+    proxy, f = _proxy_image(image)
+    actx = _asset_context(asset)
+    bg = actx.background
+    if bg and bg.get("samples"):
+        bg = {**bg, "samples": _scaled_rects(bg["samples"], f, proxy.width, proxy.height)}
+    ctx = AssetContext(regions=_scaled_rects(actx.regions, f, proxy.width, proxy.height), background=bg, frame=None,
+                       dualband_confirmed=actx.dualband_confirmed)
+    opts = ExecutionOptions(device="cpu", cancel_check=ctl.check, cpu_threads=cfg.cpu_threads or None,
+                            ai_models_dir=cfg.ai_models_dir, color_catalog_dir=cfg.color_catalog_dir)
+    cache = StageCache(max_entries=4)
+    items = task["items"]
+    results = []
+    for i, item in enumerate(items):
+        ctl.progress(f"Preview {i + 1} of {len(items)}")
+        recipe = parse_recipe(item["recipe"])
+        key = hashlib.sha256(json.dumps({"r": recipe.model_dump(), "e": PIPELINE_VERSION, "f": f, "s": asset["sha256"],
+                                         "ctx": [ctx.regions, ctx.background, ctx.dualband_confirmed]}, sort_keys=True, default=str).encode()).hexdigest()[:20]
+        name = f"presetprev-{key}.jpg"
+        meta = out_dir / f"presetprev-{key}.json"
+        if not (out_dir / name).exists() or not meta.exists():
+            res = run_pipeline(proxy, recipe, ctx, opts, cache)
+            im = Image.fromarray(exp.to_u8(res.display), "RGB" if res.display.ndim == 3 else "L")
+            im.thumbnail((480, 480), Image.Resampling.LANCZOS)
+            im.save(out_dir / name, "JPEG", quality=88)
+            meta.write_text(json.dumps({"summary": res.summary, "auto": (res.report.get("auto_preset") or {}).get("label")}), encoding="utf-8")
+        info = json.loads(meta.read_text(encoding="utf-8"))
+        results.append({"id": item["id"], "file": name, **info})
+    return {"items": results, "factor": f}
+
+
 def handle_stack(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
     """Stack frames from user folders (read-only) into a new linear FITS in the app's temporary folder."""
     import psutil
@@ -593,7 +777,7 @@ def handle_color_mix(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
 
 
 HANDLERS = {"prepare": handle_prepare, "analysis": handle_analysis, "probe": handle_probe, "enhance": handle_enhance,
-            "stack": handle_stack, "color_mix": handle_color_mix}
+            "live": handle_live, "preset_previews": handle_preset_previews, "stack": handle_stack, "color_mix": handle_color_mix}
 
 
 def worker_main(task_q, result_q, cancel_event, cfg: Config) -> None:

@@ -15,6 +15,7 @@ import numpy as np
 from scipy import ndimage
 
 from .diagnostics import MAD_TO_SIGMA, strided
+from .parallel import thread_map
 
 PEDESTAL_SIGMAS = 3.0
 EDGE_SIGMAS = 6.0
@@ -92,21 +93,17 @@ class SkyStats:
 SKY_DIM_PERCENTILE = 75.0
 
 
-def sky_stats(u: np.ndarray, stat_weight: np.ndarray) -> SkyStats:
+def sky_stats(u: np.ndarray, stat_weight: np.ndarray, threads: int = 1) -> SkyStats:
     """Per-channel sky level and noise from the dimmer part of the frame, so a bright target filling much of
-    the field does not pull the 'sky' toward its own color."""
+    the field does not pull the 'sky' toward its own color. Channels may be measured on ``threads`` threads."""
     L = u if u.ndim == 2 else u.mean(axis=2)
     lw = L[stat_weight]
     use = stat_weight
     if lw.size:
         cut = float(np.percentile(strided(lw), SKY_DIM_PERCENTILE))
         use = stat_weight & (L <= cut)
-    lv, sg = [], []
-    for ch in channels(u):
-        m, s = clipped_stats(ch[use])
-        lv.append(m)
-        sg.append(s)
-    return SkyStats(tuple(lv), tuple(sg))
+    stats = thread_map(lambda ch: clipped_stats(ch[use]), channels(u), threads)
+    return SkyStats(tuple(m for m, _ in stats), tuple(s for _, s in stats))
 
 
 # ------------------------------------------------------------------------------------------------ gradient

@@ -53,13 +53,13 @@ def _validate(recipe: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.get("")
-async def list_presets(request: Request) -> dict[str, Any]:
+def list_presets(request: Request) -> dict[str, Any]:
     rows = db_of(request).all("SELECT * FROM presets ORDER BY builtin DESC, name COLLATE NOCASE")
     return {"presets": [_out(p) for p in rows]}
 
 
 @router.post("", status_code=201)
-async def create_preset(request: Request, body: PresetIn) -> dict[str, Any]:
+def create_preset(request: Request, body: PresetIn) -> dict[str, Any]:
     db = db_of(request)
     if db.one("SELECT 1 AS x FROM presets WHERE lower(name)=lower(?)", (body.name.strip(),)):
         raise ApiError(409, "PRESET_NAME_TAKEN", "A preset with that name already exists.")
@@ -70,7 +70,7 @@ async def create_preset(request: Request, body: PresetIn) -> dict[str, Any]:
 
 
 @router.patch("/{preset_id}")
-async def patch_preset(request: Request, preset_id: str, body: PresetPatch) -> dict[str, Any]:
+def patch_preset(request: Request, preset_id: str, body: PresetPatch) -> dict[str, Any]:
     db = db_of(request)
     p = db.one("SELECT * FROM presets WHERE id=?", (preset_id,))
     if not p:
@@ -89,7 +89,7 @@ async def patch_preset(request: Request, preset_id: str, body: PresetPatch) -> d
 
 
 @router.post("/{preset_id}/duplicate", status_code=201)
-async def duplicate_preset(request: Request, preset_id: str) -> dict[str, Any]:
+def duplicate_preset(request: Request, preset_id: str) -> dict[str, Any]:
     db = db_of(request)
     p = db.one("SELECT * FROM presets WHERE id=?", (preset_id,))
     if not p:
@@ -104,7 +104,7 @@ async def duplicate_preset(request: Request, preset_id: str) -> dict[str, Any]:
 
 
 @router.delete("/{preset_id}")
-async def delete_preset(request: Request, preset_id: str) -> dict[str, Any]:
+def delete_preset(request: Request, preset_id: str) -> dict[str, Any]:
     db = db_of(request)
     p = db.one("SELECT * FROM presets WHERE id=?", (preset_id,))
     if not p:

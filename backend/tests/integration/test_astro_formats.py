@@ -258,6 +258,7 @@ def test_mixed_batch_corrupt_duplicates_and_zip(client, tmp_path):
     names = zf.namelist()
     assert "batch-summary.txt" in names and len({n.split("/")[0] for n in names if "/" in n}) == 4
     assert sum(n.endswith("/enhanced.png") for n in names) == 4 and any(n.endswith("processed-linear.fits") for n in names)
+    assert sum(n.endswith("/enhanced-display.tif") for n in names) == 4  # deferred TIFFs are rendered for the ZIP
     assert zf.testzip() is None
 
 
