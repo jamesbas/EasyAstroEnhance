@@ -79,7 +79,8 @@ def test_recipe_with_ai_flags_is_accepted_and_old_presets_migrate(client):
 
     presets = client.get("/api/v1/presets").json()["presets"]
     recipe = next(p for p in presets if p["id"] == "natural")["recipe"]
-    assert recipe["ai"] == {"background": False, "denoise": False, "stars": False, "star_brightness": 1.0}
+    assert recipe["ai"] == {"background": False, "denoise": False, "stars": False, "star_brightness": 1.0, "star_size": 1.0,
+                            "sharpen": False, "sharpen_amount": 0.5, "sharpen_stars": 0.5}
     r = client.post("/api/v1/presets", json={"name": "Mine with AI", "recipe": {**recipe, "preset": "custom", "ai": {"background": True, "denoise": True, "stars": False}}})
     assert r.status_code == 201, r.text
     # a schema-3 preset saved by engine 1.1 is migrated at start-up (AI off, every other setting kept)

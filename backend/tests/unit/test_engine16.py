@@ -126,12 +126,14 @@ def test_fringe_is_not_reported_when_the_surroundings_have_the_same_color():
 
 
 # ------------------------------------------------------------------------------ Auto preset (H1)
-def _m(core=0.0, ext=0.0, level=0.0, stars=0.0):
-    return {"core_fraction": core, "extended_fraction": ext, "extended_median_above_sky": level, "stars_per_mp": stars}
+def _m(core=0.0, ext=0.0, level=0.0, stars=0.0, video=False):
+    return {"core_fraction": core, "extended_fraction": ext, "extended_median_above_sky": level, "stars_per_mp": stars, "video_stack": video}
 
 
 def test_auto_choice_follows_measurements_never_the_object_name():
-    assert auto_preset.choose(_m(core=0.01))[0] == "bright-core"
+    assert auto_preset.choose(_m(core=0.01, stars=200))[0] == "bright-core"
+    assert auto_preset.choose(_m(core=0.4, ext=0.5, level=0.9))[0] == "moon-planets"  # a bright disc and no stars
+    assert auto_preset.choose(_m(stars=1600, video=True))[0] == "moon-planets"  # a planet video: moons and noise read as stars
     assert auto_preset.choose(_m(ext=0.3, level=0.05))[0] == "faint-detail"
     assert auto_preset.choose(_m(ext=0.3, level=0.3))[0] == "natural"  # bright extended signal: not "faint"
     assert auto_preset.choose(_m(ext=0.001, stars=500))[0] == "star-field"

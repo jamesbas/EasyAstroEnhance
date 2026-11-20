@@ -11,6 +11,12 @@ grid twice as fine through its frame's transform with bilinear weights ("Bayer d
 pixels the native statistics reject. Output pixels no frame reached are filled from the native stack, upsampled
 (counted and reported).
 
+Mosaics (subs whose header pointings differ, or Seestar mosaic sub-frames): the reference is the best frame of the
+central panel; a frame that does not match it is matched to an already aligned frame of the nearest pointing and the
+transforms are chained; the output canvas is the union of all aligned frames (capped at ``MOSAIC_MAX_AREA`` times one
+frame), and pixels no frame covered are left empty (NaN, reported). Panels are levelled by the same per-channel
+background offset as any sub-frame; no seam blending or per-panel gradient model is applied.
+
 Stacked images from different nights ("sessions"): registered (any scale), resampled onto the largest image,
 background-matched and combined, weighted by integration time, with kappa-sigma rejection from three images on.
 
@@ -30,7 +36,7 @@ from scipy import ndimage
 from ..diagnostics import MAD_TO_SIGMA
 from ..imagedata import ProcessingError
 from .calibrate import Calibration, _K, bayer_masks, debayer
-from .frames import FrameInfo, read_frame
+from .frames import FrameInfo, pointing_offsets, read_frame
 from .quality import FrameStats, StarList, grade, measure
 from .register import IDENTITY, Match, Transform, match
 
@@ -38,6 +44,8 @@ DEFAULT_KAPPA = 3.0
 SIGMA_ITERATIONS = 3
 MIN_FRAMES = 2
 EXACT_MAX_FRAMES = 40
+MOSAIC_MAX_AREA = 6.0  # mosaic canvas at most this many frame areas
+MOSAIC_CHAIN_TRIES = 4
 
 
 @dataclass
@@ -50,6 +58,13 @@ class StackOptions:
     memory_budget_bytes: int = 3 * 1024**3
     device: str = "auto"  # auto | gpu | cpu
     threads: int = 4
+    mosaic: bool = False  # subs: union canvas over all frames, chained registration
+
+
+def compose(t2: Transform, t1: Transform) -> Transform:
+    """The similarity x -> t2(t1(x))."""
+    tx, ty = t2.apply(np.float64(t1.tx), np.float64(t1.ty))
+    return Transform(t2.a * t1.a - t2.b * t1.b, t2.a * t1.b + t2.b * t1.a, float(tx), float(ty))
 
 
 @dataclass
@@ -219,11 +234,17 @@ def stack_subs(lights: list[FrameInfo], cal: Calibration, opts: StackOptions, ch
                 progress(f"Measuring frames {done}/{len(lights)}", 0.25 * done / len(lights))
 
     # ---- 2. grade and pick the reference
-    reasons = grade(stats, opts.grading)
+    offs = pointing_offsets(lights) if opts.mosaic else None
+    reasons = grade(stats, opts.grading, _neighbours(offs) if offs is not None else None)
     kept = [i for i, r in enumerate(reasons) if r is None]
     if len(kept) < MIN_FRAMES:
         raise ProcessingError("TOO_FEW_GOOD_FRAMES", f"Only {len(kept)} usable frames remained after quality checks; at least {MIN_FRAMES} are needed.")
-    ref = max(kept, key=lambda i: (stats[i].stars / max(stats[i].fwhm or 10.0, 0.5) ** 2, -i))  # type: ignore[union-attr]
+    pool = kept
+    if offs is not None:  # the reference comes from the central panel, so most panels overlap it directly
+        dist = np.hypot(offs[:, 0], offs[:, 1])
+        near = min(dist[i] for i in kept)
+        pool = [i for i in kept if dist[i] <= near + 0.02]
+    ref = max(pool, key=lambda i: (stats[i].stars / max(stats[i].fwhm or 10.0, 0.5) ** 2, -i))  # type: ignore[union-attr]
     rep["reference"] = {"name": lights[ref].name, **stats[ref].to_dict()}  # type: ignore[union-attr]
 
     # ---- 3. register
@@ -241,6 +262,7 @@ def stack_subs(lights: list[FrameInfo], cal: Calibration, opts: StackOptions, ch
             reasons[i] = m.reason
         if n % 20 == 0:
             progress(f"Aligning frames {n + 1}/{len(kept)}", 0.25 + 0.1 * (n + 1) / len(kept))
+    chained = _chain_unmatched(kept, transforms, stars, offs, reasons, regs, lights, check) if opts.mosaic else 0
     used = [i for i in kept if i in transforms]
     if len(used) < MIN_FRAMES:
         raise ProcessingError("ALIGNMENT_FAILED", "Too few frames could be aligned to each other; check that the folder holds one target.")
@@ -264,6 +286,9 @@ def stack_subs(lights: list[FrameInfo], cal: Calibration, opts: StackOptions, ch
 
     H, W = lights[ref].height, lights[ref].width
     C = 3 if layout == "cfa" else 1
+    if opts.mosaic:
+        transforms, (H, W), rep["mosaic"] = _union_canvas(transforms, used, lights[ref].width, lights[ref].height)
+        rep["mosaic"]["chained_frames"] = chained
 
     def warped(i: int) -> np.ndarray:
         check()
@@ -317,10 +342,56 @@ def stack_subs(lights: list[FrameInfo], cal: Calibration, opts: StackOptions, ch
     rep["seconds"] = round(time.perf_counter() - t0, 2)
     data = out if C == 3 else out[..., 0]
     data = np.where((cov > 0)[..., None] if data.ndim == 3 else cov > 0, data, np.nan).astype(np.float32)
-    hdr = _header_for(headers[ref] if headers[ref] is not None else read_frame(lights[ref])[1], lights, used, "subs" if opts.scale == 1 else "subs-drizzle2x", {})
+    hdr = _header_for(headers[ref] if headers[ref] is not None else read_frame(lights[ref])[1], lights, used, ("subs" if opts.scale == 1 else "subs-drizzle2x") + ("-mosaic" if opts.mosaic else ""), {})
     if C == 1:
         del hdr["CTYPE3"]
     return StackResult(data, cov, hdr, rep)
+
+
+MOSAIC_NEIGHBOURS = 9  # Seestar mosaics record about two frames per panel: compare with the surrounding panels too
+
+
+def _neighbours(offs: np.ndarray) -> list[list[int]]:
+    """For each frame, the frames whose header pointings are nearest (itself included)."""
+    d = np.hypot(offs[:, None, 0] - offs[None, :, 0], offs[:, None, 1] - offs[None, :, 1])
+    return [list(np.argsort(row, kind="stable")[:MOSAIC_NEIGHBOURS]) for row in d]
+
+
+def _chain_unmatched(kept, transforms, stars, offs, reasons, regs, lights, check) -> int:
+    """Mosaics: match each frame that failed against the reference to aligned frames of the nearest pointings."""
+    chained = 0
+    for i in [i for i in kept if i not in transforms]:
+        check()
+        cands = [j for j in transforms if j != i]
+        if offs is not None:
+            cands.sort(key=lambda j: float(np.hypot(*(offs[j] - offs[i]))))
+        for j in cands[:MOSAIC_CHAIN_TRIES]:
+            m = match(stars[j], stars[i], (0.97, 1.03))
+            if m.ok:
+                transforms[i] = compose(transforms[j], m.transform)
+                regs[lights[i].name] = {"rms_px": m.rms, "stars": m.inliers, "chained_via": lights[j].name, **transforms[i].to_dict()}
+                reasons[i] = None
+                chained += 1
+                break
+    return chained
+
+
+def _union_canvas(transforms: dict[int, Transform], used: list[int], w: int, h: int):
+    """Shift every frame -> reference transform onto a canvas holding all aligned frames."""
+    xs, ys = [], []
+    for i in used:
+        cx, cy = transforms[i].apply(np.array([0.0, w - 1.0, 0.0, w - 1.0]), np.array([0.0, 0.0, h - 1.0, h - 1.0]))
+        xs += list(cx)
+        ys += list(cy)
+    x0, y0 = int(np.floor(min(xs))), int(np.floor(min(ys)))
+    W, H = int(np.ceil(max(xs))) - x0 + 1, int(np.ceil(max(ys))) - y0 + 1
+    if W * H > MOSAIC_MAX_AREA * w * h:
+        raise ProcessingError("MOSAIC_TOO_LARGE", f"The aligned frames span {W} x {H} pixels, more than {MOSAIC_MAX_AREA:g} frames' area; "
+                              "check that the folder holds one mosaic.")
+    shift = Transform(1.0, 0.0, float(-x0), float(-y0))
+    out = {i: compose(shift, t) for i, t in transforms.items()}
+    return out, (H, W), {"canvas": [W, H], "frame": [w, h], "reference_offset_px": [-x0, -y0],
+                         "method": "union of all aligned frames; uncovered pixels empty; panels levelled by per-channel background offsets"}
 
 
 def _streaming(used, warped, wmap, H, W, C, opts, reject, check, progress):

@@ -228,7 +228,8 @@ def test_deconvolution_is_opt_in_and_tightens_stars():
     off = run(lin(arr), base)
     on = run(lin(arr), base.model_copy(update={"advanced": AdvancedRecipe(deconvolution=True, deconvolution_iterations=15)}))
     d = op(on, "deconvolution")
-    assert d["status"] == "applied" and 1.4 < d["parameters"]["psf_sigma_px"] < 2.6
+    assert d["status"] == "applied" and 3.8 < d["parameters"]["psf"]["fwhm_px"] < 5.8  # Gaussian sigma 2 px = FWHM 4.7 px
+    assert d["parameters"]["psf"]["model"] == "Moffat" and len(d["parameters"]["psf_zones"]) == 9
     assert op(off, "deconvolution")["status"] == "off"
 
     def peak_ratio(a):

@@ -7,9 +7,10 @@ interface UploadPanelProps {
   onFiles: (files: File[]) => void;
   uploading: boolean;
   onStack?: () => void;
+  onSeestar?: () => void;
 }
 
-export function UploadPanel({ variant, onFiles, uploading, onStack }: UploadPanelProps) {
+export function UploadPanel({ variant, onFiles, uploading, onStack, onSeestar }: UploadPanelProps) {
   const input = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
 
@@ -67,6 +68,12 @@ export function UploadPanel({ variant, onFiles, uploading, onStack }: UploadPane
         <p className="helper stack-hint">
           Have a folder of raw sub-frames (for example a Seestar <code>…_sub</code> folder)?{' '}
           <button type="button" className="btn" onClick={onStack} data-testid="stack-button-empty">Stack frames…</button>
+        </p>
+      )}
+      {onSeestar && (
+        <p className="helper stack-hint">
+          Using a Seestar? <button type="button" className="btn" onClick={onSeestar} data-testid="seestar-button-empty">Import from Seestar…</button>
+          {' '}lists your targets and adds the newest stack in one click.
         </p>
       )}
     </section>

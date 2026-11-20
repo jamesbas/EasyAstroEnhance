@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .api import ai, assets, jobs, presets, runs, settings, stacks
+from .api import ai, assets, jobs, presets, reference_data, runs, settings, stacks
 from .config import Config, ensure_dirs, load_config
 from .db import Database
 from .processing.recipe import PIPELINE_VERSION, RECIPE_SCHEMA_VERSION
@@ -19,6 +19,7 @@ from .processing.stacking.stack import STACK_VERSION
 from .security import SecurityMiddleware
 from .services.ai_models import ModelManager
 from .services.queue import Coordinator
+from .services.reference_data import ReferenceDataManager
 
 
 def create_app(cfg: Config | None = None, start_worker: bool = True) -> FastAPI:
@@ -33,6 +34,7 @@ def create_app(cfg: Config | None = None, start_worker: bool = True) -> FastAPI:
         coordinator = Coordinator(cfg, db)
         app.state.cfg, app.state.db, app.state.coordinator = cfg, db, coordinator
         app.state.ai_models = ModelManager(cfg.ai_models_dir, cfg.min_free_bytes)
+        app.state.reference_data = ReferenceDataManager(cfg.reference_data_dir, cfg.min_free_bytes)
         if start_worker:
             coordinator.start()
         yield
@@ -58,7 +60,7 @@ def create_app(cfg: Config | None = None, start_worker: bool = True) -> FastAPI:
         )
 
     prefix = "/api/v1"
-    for r in (ai.router, assets.router, jobs.router, presets.router, runs.router, settings.router, stacks.router):
+    for r in (ai.router, assets.router, jobs.router, presets.router, reference_data.router, runs.router, settings.router, stacks.router):
         app.include_router(r, prefix=prefix)
 
     @app.get(f"{prefix}/session")

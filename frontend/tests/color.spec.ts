@@ -19,7 +19,8 @@ test.describe('optional color workflow', () => {
     await expect(page.getByRole('img', { name: 'Object color preview' })).toBeVisible();
     await page.getByLabel('Show color mask').check();
     await expect(page.getByRole('img', { name: 'Object color mask' })).toBeVisible();
-    await page.getByText('Catalog color', { exact: true }).click();
+    await page.getByText('Star colour', { exact: true }).click();
+    await page.getByText('Use my own catalog', { exact: true }).click();
     await page.getByLabel('Reference star CSV').setInputFiles(path.join(dir!, 'reference.csv'));
     await expect(page.getByText(/reference.csv \(16 stars\)/)).toBeVisible();
     await page.getByText('Stretch method', { exact: true }).click();

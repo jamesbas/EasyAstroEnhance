@@ -97,7 +97,7 @@ def channel_backgrounds(img: np.ndarray, layout: str, pattern: str | None) -> li
     return [med(img)]
 
 
-def measure(img: np.ndarray, layout: str, pattern: str | None = None) -> tuple[FrameStats, StarList]:
+def measure(img: np.ndarray, layout: str, pattern: str | None = None, max_area: int = MAX_AREA) -> tuple[FrameStats, StarList]:
     L, f = luminance_proxy(img, layout)
     L = L.astype(np.float32)
     small = L[::4, ::4]
@@ -117,7 +117,7 @@ def measure(img: np.ndarray, layout: str, pattern: str | None = None) -> tuple[F
         area = ndimage.sum(det, labels, idx)
         flux = ndimage.sum(resid, labels, idx)
         peak = ndimage.maximum(resid, labels, idx)
-        ok = (area >= MIN_AREA) & (area <= MAX_AREA) & (peak > DETECT_SIGMAS * noise)
+        ok = (area >= MIN_AREA) & (area <= max_area) & (peak > DETECT_SIGMAS * noise)
         sel = idx[ok]
         if sel.size:
             w = np.where(labels > 0, np.maximum(resid, 0), 0)
@@ -148,8 +148,16 @@ def measure(img: np.ndarray, layout: str, pattern: str | None = None) -> tuple[F
     return stats, stars
 
 
-def grade(stats: list[FrameStats | None], mood: str) -> list[str | None]:
-    """Reason for rejecting each frame (None = keep)."""
+MOSAIC_SESSION_FLOOR = 0.6  # mosaics: nearby frames set the reference, but never below this share of the session's
+
+
+def grade(stats: list[FrameStats | None], mood: str, neighbours: list[list[int]] | None = None) -> list[str | None]:
+    """Reason for rejecting each frame (None = keep).
+
+    ``neighbours`` (mosaics): star count, star brightness and sky level depend on the part of the sky a frame covers, so
+    each frame is compared with the frames pointing nearest to it (itself included) - but with at least
+    ``MOSAIC_SESSION_FLOOR`` of the session's star count and brightness, so a neighbourhood recorded entirely through
+    haze is still rejected; star size and trailing are compared across the whole session."""
     out: list[str | None] = [None if s else "could not be measured" for s in stats]
     limits = GRADING.get(mood)
     good = [s for s in stats if s]
@@ -164,16 +172,23 @@ def grade(stats: list[FrameStats | None], mood: str) -> list[str | None]:
         m = float(np.median(v))
         return m, float(np.median(np.abs(v - m)) * MAD_TO_SIGMA)
 
-    med_stars = float(np.median([s.stars for s in good]))
-    fluxes = [s.star_flux for s in good if s.star_flux]
-    med_flux = float(np.median(fluxes)) if fluxes else 0.0
     fw_m, fw_s = robust(s.fwhm for s in good)
-    bg_m, bg_s = robust(s.background for s in good)
+    def reference(members: list[FrameStats]) -> tuple[float, float, float, float]:
+        fluxes = [s.star_flux for s in members if s.star_flux]
+        return (float(np.median([s.stars for s in members])), float(np.median(fluxes)) if fluxes else 0.0,
+                *robust(s.background for s in members))
+
+    session = reference(good)
     for i, s in enumerate(stats):
         if s is None:
             continue
+        near = [stats[j] for j in neighbours[i] if stats[j]] if neighbours is not None else []
+        med_stars, med_flux, bg_m, bg_s = reference(near) if near else session
+        if near:  # a whole neighbourhood recorded through haze is still judged against the session
+            med_stars = max(med_stars, MOSAIC_SESSION_FLOOR * session[0])
+            med_flux = max(med_flux, MOSAIC_SESSION_FLOOR * session[1])
         if s.stars < max(8, min_ratio * med_stars):
-            out[i] = f"only {s.stars} stars (session median {med_stars:.0f}): clouds or haze"
+            out[i] = f"only {s.stars} stars ({'nearby frames' if neighbours is not None else 'session'} median {med_stars:.0f}): clouds or haze"
         elif med_flux > 0 and s.star_flux is not None and s.star_flux < min_ratio * med_flux:
             out[i] = f"stars {100 * s.star_flux / med_flux:.0f}% as bright as usual: clouds or haze"
         elif s.fwhm is not None and fw_s > 0 and s.fwhm > fw_m + fwhm_sig * max(fw_s, 0.05 * fw_m):

@@ -53,6 +53,10 @@ class Config:
         return self.data_dir / "ai-models"
 
     @property
+    def reference_data_dir(self) -> Path:
+        return self.data_dir / "reference-data"
+
+    @property
     def color_catalog_dir(self) -> Path:
         return self.data_dir / "color-catalogs"
 
@@ -88,5 +92,5 @@ def load_config(**overrides) -> Config:
 
 
 def ensure_dirs(cfg: Config) -> None:
-    for d in (cfg.data_dir, cfg.assets_dir, cfg.runs_dir, cfg.exports_dir, cfg.tmp_dir, cfg.ai_models_dir, cfg.color_catalog_dir):
+    for d in (cfg.data_dir, cfg.assets_dir, cfg.runs_dir, cfg.exports_dir, cfg.tmp_dir, cfg.ai_models_dir, cfg.color_catalog_dir, cfg.reference_data_dir):
         d.mkdir(parents=True, exist_ok=True)

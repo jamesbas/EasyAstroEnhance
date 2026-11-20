@@ -1,7 +1,8 @@
 """Auto preset (engine 1.6): choose a built-in rendering style per image from measurements of the image itself.
 
 The measurements use a small binned copy (about 1 MP) shown with the frozen baseline display stretch: bright extended
-cores, how much of the frame holds extended (non-star) signal and how faint it is, and how many stars there are. The
+cores, how much of the frame holds extended (non-star) signal and how faint it is, and how many stars there are. A
+lucky-imaging video stack (marked by the app's own stacker) is always a Solar System target. The
 object's name, coordinates and any reference image are never used (fidelity rule 2). The choice and the measured values
 are recorded in the processing report; the chosen preset's settings then run exactly as if the user had picked it.
 """
@@ -30,7 +31,9 @@ FAINT_EXT_FRACTION = 0.07  # extended signal covers a good part of the frame ...
 FAINT_LEVEL = 0.12  # ... and is faint: its median rises less than this above the sky
 STARFIELD_EXT_FRACTION = 0.005  # almost no extended signal (thin filaments and small galaxies stay on Natural) ...
 STARFIELD_STARS_PER_MP = 100  # ... and a populated star field
-CHOICES = ("natural", "faint-detail", "bright-core", "star-field")
+SOLAR_SYSTEM_STARS_PER_MP = 3.0  # deep-sky stacks measured 36+ stars per MP; the Moon and planets have (almost) none
+SOLAR_SYSTEM_CORE_FRACTION = 0.0005
+CHOICES = ("natural", "faint-detail", "bright-core", "star-field", "moon-planets")
 
 
 def _bin(a: np.ndarray, valid: np.ndarray, f: int) -> tuple[np.ndarray, np.ndarray]:
@@ -76,11 +79,24 @@ def measure(image: ImageData) -> dict[str, Any]:
         "core_fraction": float(core.sum() / n),
         "stars_per_mp": float(accepted / (h * w / 1e6)),
         "stars": accepted,
+        "video_stack": _is_video_stack(image),
     }
+
+
+def _is_video_stack(image: ImageData) -> bool:
+    """Acquisition type, not object identity: the app's own video stacker marks its FITS with EAESTACK='video'."""
+    try:
+        return image.header is not None and str(image.header.get("EAESTACK", "")).strip().lower() == "video"
+    except Exception:
+        return False
 
 
 def choose(m: dict[str, Any]) -> tuple[str, list[str]]:
     """The preset id and the reasons, in plain words."""
+    if m.get("video_stack"):
+        return "moon-planets", ["a lucky-imaging stack of a video recording (the Seestar records video only of the Moon, Sun and planets)"]
+    if m["stars_per_mp"] < SOLAR_SYSTEM_STARS_PER_MP and m["core_fraction"] >= SOLAR_SYSTEM_CORE_FRACTION:
+        return "moon-planets", [f"a bright disc with almost no stars ({m['stars_per_mp']:.1f} stars per megapixel): the Moon, Sun or a planet"]
     if m["core_fraction"] >= CORE_FRACTION:
         return "bright-core", [f"a bright extended core covers {m['core_fraction']:.2%} of the frame"]
     if m["extended_fraction"] >= FAINT_EXT_FRACTION and m["extended_median_above_sky"] < FAINT_LEVEL:

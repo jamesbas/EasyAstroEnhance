@@ -36,8 +36,14 @@ def _download_context() -> ssl.SSLContext | None:
 
 
 class ModelManager:
-    def __init__(self, models_dir: Path, min_free_bytes: int = 256 * 1024 * 1024, graxpert_root: Path | None = None) -> None:
+    @property
+    def specs(self) -> dict[str, Any]:
+        return self._specs if self._specs is not None else registry.MODELS  # looked up per call (tests patch the registry)
+
+    def __init__(self, models_dir: Path, min_free_bytes: int = 256 * 1024 * 1024, graxpert_root: Path | None = None,
+                 specs: dict[str, Any] | None = None) -> None:
         self.dir = Path(models_dir)
+        self._specs = specs
         self.min_free = min_free_bytes
         local = os.environ.get("LOCALAPPDATA")
         self.graxpert_root = graxpert_root if graxpert_root is not None else (Path(local) / "GraXpert" / "GraXpert" if local else None)
@@ -81,13 +87,13 @@ class ModelManager:
 
     # ------------------------------------------------------------------ actions
     def start(self, model_id: str) -> dict[str, Any]:
-        spec = registry.MODELS[model_id]
+        spec = self.specs[model_id]
         with self._lock:
             if registry.installed(self.dir, spec) or (self._jobs.get(model_id) or {}).get("state") == "downloading":
                 return self.status(spec)
             self._jobs[model_id] = {"state": "downloading", "received": 0, "started": time.time()}
             self._cancel[model_id] = threading.Event()
-        threading.Thread(target=self._run, args=(spec,), daemon=True, name=f"ai-download-{model_id}").start()
+        threading.Thread(target=self._run, args=(spec,), daemon=True, name=f"download-{model_id}").start()
         return self.status(spec)
 
     def cancel(self, model_id: str) -> None:
@@ -96,7 +102,7 @@ class ModelManager:
             ev.set()
 
     def delete(self, model_id: str) -> None:
-        spec = registry.MODELS[model_id]
+        spec = self.specs[model_id]
         self.cancel(model_id)
         p = registry.model_file(self.dir, spec)
         for f in (p.with_name(p.name + registry.VERIFIED_SUFFIX), p, p.with_name(p.name + ".part")):
@@ -111,11 +117,11 @@ class ModelManager:
         t0 = time.time()
         while time.time() - t0 < timeout and (self._jobs.get(model_id) or {}).get("state") == "downloading":
             time.sleep(0.05)
-        return self.status(registry.MODELS[model_id])
+        return self.status(self.specs[model_id])
 
     # ------------------------------------------------------------------ internals
     def _graxpert_copy(self, spec: registry.ModelSpec) -> Path | None:
-        if not (self.graxpert_root and spec.graxpert_dir):
+        if not (self.graxpert_root and getattr(spec, "graxpert_dir", None)):
             return None
         p = self.graxpert_root / spec.graxpert_dir / spec.version / "model.onnx"
         try:

@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -319,8 +320,11 @@ def _linear_history(report: dict[str, Any]) -> list[str]:
         lines.append("White-balance gains R,G,B: " + ", ".join(f"{v:.4f}" for v in f))
     cat = ops.get("catalog_color") or {}
     if cat.get("status") == "applied":
-        lines.append("Catalog gains R,G,B: " + ", ".join(f"{v:.4f}" for v in cat["gains_rgb"]))
-        lines.append(f"Offline reference CSV SHA-256: {cat['sha256'][:24]}... (full hash in report)")
+        lines.append("Catalog gains R,G,B: " + ", ".join(f"{v:.4f}" for v in cat.get("gains_rgb") or []))
+        if cat.get("sha256"):  # a user-imported reference CSV
+            lines.append(f"Offline reference CSV SHA-256: {cat['sha256'][:24]}... (full hash in report)")
+        else:  # Accurate star colours: the built-in catalog through the image's sky solution
+            lines.append(f"Catalog colour: built-in Gaia DR3, {cat.get('used', 0)} stars, {cat.get('sky_solution') or '?'} sky solution")
     if (ops.get("deconvolution") or {}).get("status") == "applied":
         lines.append("Richardson-Lucy deconvolution applied (see processing.json).")
     if (ops.get("denoise") or {}).get("status") == "applied":
@@ -418,18 +422,79 @@ def _execution_options(cfg: Config, settings: dict[str, Any], ctl, job_id: str |
         backend_factory=factory,
         ai_models_dir=cfg.ai_models_dir,
         color_catalog_dir=cfg.color_catalog_dir,
+        reference_data_dir=cfg.reference_data_dir,
     )
     return opts, probe_info, device
 
 
-def _asset_context(asset: dict[str, Any]) -> AssetContext:
+def _asset_context(asset: dict[str, Any], cfg: Config | None = None) -> AssetContext:
     bg = asset.get("background")
     return AssetContext(
         regions=asset.get("regions") or [],
         background=bg if (bg and bg.get("confirmed")) else None,
         frame=(asset.get("prepared") or {}).get("frame"),
         dualband_confirmed=(asset.get("interpretation") or {}).get("dualband_confirmed") is True,
+        sky_solution=load_sky_solution(cfg, asset) if cfg is not None else None,
     )
+
+
+# ----------------------------------------------------------------------------------------------- sky solution
+SKY_FILE = "sky-solution.json"
+
+
+def load_sky_solution(cfg: Config, asset: dict[str, Any]) -> dict[str, Any] | None:
+    """The stored solution for this asset's current HDU (an intake change makes an older one stale)."""
+    p = cfg.assets_dir / asset["id"] / SKY_FILE
+    try:
+        sol = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if sol.get("hdu") != (asset.get("interpretation") or {}).get("hdu") or sol.get("source_sha256") != asset.get("sha256"):
+        return None
+    return sol
+
+
+def solve_and_store(cfg: Config, image: ImageData, asset: dict[str, Any], user: dict[str, Any] | None, ctl) -> dict[str, Any]:
+    from ..processing.catalogs import objects as dso
+    from ..processing.catalogs import registry as refreg
+    from ..processing.catalogs.stars import open_catalog
+    from ..processing.sky_solution import sky_solution
+
+    path = refreg.installed(cfg.reference_data_dir, "stars-gaia-dr3")
+    if path is None:
+        return {"status": "unavailable", "reason": "The star catalog is not installed (Settings → Reference data)."}
+    resolver = None
+    if refreg.group_ready(cfg.reference_data_dir, "objects"):
+        objs = dso.objects_from(tuple(str(refreg.installed(cfg.reference_data_dir, k)) for k in refreg.GROUPS["objects"]))
+
+        def resolver(name: str):
+            o = dso.resolve_name(objs, name)
+            return (o.ra, o.dec, o.name) if o else None
+    ctl.progress("Finding where the image points on the sky")
+    sol = sky_solution(image, open_catalog(str(path)), user, ctl.check, resolver)
+    sol.update(hdu=(asset.get("interpretation") or {}).get("hdu"), source_sha256=asset.get("sha256"),
+               engine=PIPELINE_VERSION, catalog_sha256=refreg.DATA["stars-gaia-dr3"].sha256, user_hints=user or None,
+               width=image.width, height=image.height, flip_rows=bool(image.flip_rows_on_export))
+    p = cfg.assets_dir / asset["id"] / SKY_FILE
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(sol, default=float), encoding="utf-8")
+    tmp.replace(p)
+    return sol
+
+
+def _ensure_solution(cfg: Config, image: ImageData, asset: dict[str, Any], recipe, ctx: AssetContext, ctl) -> AssetContext:
+    """Accurate star colours need a sky solution: solve once (header WCS check or hinted solve) and keep it with the asset."""
+    from dataclasses import replace
+
+    if recipe.catalog_builtin and ctx.sky_solution is None and image.domain == "linear" and image.channels == 3:
+        return replace(ctx, sky_solution=solve_and_store(cfg, image, asset, None, ctl))
+    return ctx
+
+
+def handle_sky_solve(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
+    asset = task["asset"]
+    image = load_image(cfg, asset)
+    return solve_and_store(cfg, image, asset, task.get("hints"), ctl)
 
 
 def _enhance_cached(cfg: Config, image: ImageData, recipe, ctx: AssetContext, opts: ExecutionOptions):
@@ -474,7 +539,7 @@ def handle_enhance(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
     try:
         job_id = task["job_id"]
         opts, probe_info, device = _execution_options(cfg, settings, ctl, job_id)
-        ctx = _asset_context(asset)
+        ctx = _ensure_solution(cfg, image, asset, recipe, _asset_context(asset, cfg), ctl)
         label_backend, _ = choose_backend(opts, image.height, image.width, image.channels)
         ctl.label("Processing: GPU + CPU" if label_backend == "gpu" else "Processing: CPU")
         result = _enhance_cached(cfg, image, recipe, ctx, opts)
@@ -501,13 +566,15 @@ def handle_enhance(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
 
         if image.source_format == "fits":
             strip = bool(settings.get("strip_location", True))
+            sol = ctx.sky_solution or {}
+            solved = sol.get("header") if sol.get("status") == "solved" else None
             if image.domain == "linear":
                 hist = _linear_history(result.report)
                 specs.append(("fits", "processed-linear.fits", "Processed linear FITS (no display-only operations)",
-                              lambda p: exp.write_fits(p, image, result.processed, "processed-linear", recipe.preset, strip, hist)))
+                              lambda p: exp.write_fits(p, image, result.processed, "processed-linear", recipe.preset, strip, hist, solved)))
             else:
                 specs.append(("fits", "display-processed.fits", "Display-processed FITS (not linear data)",
-                              lambda p: exp.write_fits(p, image, result.display, "display-processed", recipe.preset, strip)))
+                              lambda p: exp.write_fits(p, image, result.display, "display-processed", recipe.preset, strip, None, solved)))
         elif image.source_format == "tiff" and image.domain == "linear":
             import tifffile
 
@@ -519,6 +586,19 @@ def handle_enhance(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
             save_npy(partial / "display.npy", to_u16(result.display))
             if result.display_fixed is not None:
                 save_npy(partial / "display_fixed.npy", to_u16(result.display_fixed))
+            if result.layers is not None:  # sources of the on-request Starless / Stars exports
+                save_npy(partial / "display_starless.npy", to_u16(result.layers["starless"]))
+                save_npy(partial / "display_stars.npy", to_u16(result.layers["stars"]))
+                save_npy(partial / "starless_linear.npy", np.asarray(result.layers["starless_linear"], dtype=np.float32))
+
+        layer_note = ("Made with learned (AI) star separation; large or saturated stars may remain partly in the starless "
+                      "layer. Rendered on request; not part of Download all.")
+        if result.layers is not None:
+            specs.append(("starless-png", "starless.png", "Starless (display, 16-bit PNG)", None))
+            specs.append(("stars-png", "stars-only.png", "Stars only on black (display, 16-bit PNG)", None))
+            if image.source_format == "fits":
+                specs.append(("starless-fits", "starless-linear.fits", "Starless linear FITS", None))
+                specs.append(("stars-fits", "stars-linear.fits", "Stars linear FITS (processed minus starless)", None))
 
         ctl.check()
         jobs = [(name, writer) for _, name, _, writer in specs if writer is not None] + [("display.npy", viewer_arrays)]
@@ -534,7 +614,8 @@ def handle_enhance(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
         for kind, name, label, writer in specs:
             if writer is None:
                 ex_list.append({"kind": kind, "filename": name, "label": label, "bytes": None, "sha256": None, "deferred": True,
-                                "note": "Rendered on first request from display.npy (identical values); size and hash are recorded then."})
+                                "note": layer_note if kind in ("starless-png", "stars-png", "starless-fits", "stars-fits") else
+                                "Rendered on first request from display.npy (identical values); size and hash are recorded then."})
             else:
                 ex_list.append({"kind": kind, "filename": name, "label": label, "bytes": (partial / name).stat().st_size, "sha256": hashes[name]})
         report = result.report
@@ -549,6 +630,7 @@ def handle_enhance(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
                 "protected_regions": asset.get("regions") or [],
                 "background_confirmation": ctx.background,
                 "baseline_frame": ctx.frame,
+                "sky_solution": ctx.sky_solution,
             },
             "settings": {"device": device, "strip_location": settings.get("strip_location", True)},
             "resources": {
@@ -625,7 +707,7 @@ def handle_live(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
     _memory_check(cfg, asset, settings)
     image = load_image(cfg, asset)
     opts, _, _ = _execution_options(cfg, settings, ctl, None)
-    result = _enhance_cached(cfg, image, recipe, _asset_context(asset), opts)
+    result = _enhance_cached(cfg, image, recipe, _ensure_solution(cfg, image, asset, recipe, _asset_context(asset, cfg), ctl), opts)
     ctl.progress("Showing the preview")
     out_dir = Path(task["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -777,7 +859,23 @@ def handle_color_mix(cfg: Config, task: dict[str, Any], ctl) -> dict[str, Any]:
 
 
 HANDLERS = {"prepare": handle_prepare, "analysis": handle_analysis, "probe": handle_probe, "enhance": handle_enhance,
-            "live": handle_live, "preset_previews": handle_preset_previews, "stack": handle_stack, "color_mix": handle_color_mix}
+            "live": handle_live, "preset_previews": handle_preset_previews, "stack": handle_stack, "color_mix": handle_color_mix,
+            "sky_solve": handle_sky_solve}
+
+
+AI_IDLE_RELEASE_S = 60.0  # free the AI model sessions (and their GPU memory) after this long without work
+
+
+def _release_idle_gpu() -> None:
+    from ..processing.ai import runtime as ai_runtime
+
+    if ai_runtime.drop_sessions() and "cupy" in sys.modules:  # never initialise CUDA just to free memory
+        try:
+            cp = sys.modules["cupy"]
+            cp.get_default_memory_pool().free_all_blocks()
+            cp.get_default_pinned_memory_pool().free_all_blocks()
+        except Exception:
+            pass
 
 
 def worker_main(task_q, result_q, cancel_event, cfg: Config) -> None:
@@ -787,13 +885,18 @@ def worker_main(task_q, result_q, cancel_event, cfg: Config) -> None:
 
     import psutil
 
+    from ..processing.ai import runtime as ai_runtime
+
     parent = os.getppid()
+    idle_since = time.monotonic()
     while True:
         try:
             task = task_q.get(timeout=2.0)
         except _queue.Empty:
             if not psutil.pid_exists(parent):  # the server was killed: never linger as an orphan
                 break
+            if time.monotonic() - idle_since >= AI_IDLE_RELEASE_S and ai_runtime.has_sessions():
+                _release_idle_gpu()
             continue
         if task is None:
             break
@@ -809,5 +912,6 @@ def worker_main(task_q, result_q, cancel_event, cfg: Config) -> None:
         except MemoryError:
             result_q.put(("error", task_id, {"code": "OUT_OF_MEMORY", "message": "Not enough memory to process this image. Close other applications and try again.", "detail": None}))
         except Exception as exc:
-            result_q.put(("error", task_id, {"code": "INTERNAL_ERROR", "message": "Something went wrong while processing this image.", "detail": f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=6)}"}))
+            result_q.put(("error", task_id, {"code": "INTERNAL_ERROR", "message": "Something went wrong while processing this image.", "detail": f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=-10)}"}))  # innermost frames: where it failed
+        idle_since = time.monotonic()
 

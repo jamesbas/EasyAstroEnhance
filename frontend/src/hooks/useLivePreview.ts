@@ -54,7 +54,7 @@ export function useLivePreview(assetId: string | null, recipe: Recipe | null, en
           if (stopped) return;
           if (st.id !== id) return; // replaced by a newer request (another tab or a quick follow-up)
           if (st.state === 'ready') setState({ asset: assetId, status: 'ready', preview: st, key, error: null });
-          else if (st.state === 'failed') setState((s) => ({ ...s, status: 'failed', error: st.error ?? 'The live preview could not be made.' }));
+          else if (st.state === 'failed') setState((s) => ({ ...s, status: 'failed', error: st.error?.message ?? 'The live preview could not be made.' }));
           else if (st.state === 'cancelled') setState((s) => ({ ...s, status: 'off' }));
           else poll = window.setTimeout(() => void check(id), POLL_MS);
         } catch (err) {

@@ -10,13 +10,13 @@ from fastapi import APIRouter, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, Response
 
-from ..models.api import BatchExportIn, ConfirmIn, EditExportIn
+from ..models.api import BatchExportIn, ConfirmIn, EditExportIn, FramingIn
 from ..processing.edit_export import Framing, render_edited
 from ..processing.export import _clean_header
 from ..processing.imagedata import ProcessingError
 from ..processing.recipe import PIPELINE_VERSION
 from ..services import previews
-from ..services.exports import ALLOWED_KINDS, cancel_batch, ensure_export, start_batch
+from ..services.exports import ALLOWED_KINDS, DOWNLOADABLE_KINDS, cancel_batch, ensure_export, start_batch
 from .common import ApiError, cfg_of, coord_of, db_of, serialize_run
 
 router = APIRouter(tags=["runs"])
@@ -108,7 +108,7 @@ async def download_export(request: Request, run_id: str, kind: str):
     if kind == "fits-full":
         path = await run_in_threadpool(_full_metadata_fits, request, run)
         return FileResponse(path, media_type=MEDIA[".fits"], filename=f"{(run['summary'] or {}).get('run_name', run_id)}-full-metadata.fits")
-    if kind not in ALLOWED_KINDS:
+    if kind not in DOWNLOADABLE_KINDS:
         raise ApiError(404, "UNKNOWN_EXPORT", "That export type does not exist.")
     entry = next((e for e in run["exports"] or [] if e["kind"] == kind), None)
     if not entry:
@@ -162,21 +162,79 @@ async def edit_export_target(request: Request, run_id: str):
     return {"target": target}
 
 
+def _annotation_context(request: Request, run_id: str) -> tuple[dict[str, Any] | None, tuple, str | None, str | None]:
+    """(sky solution, deep-sky objects, objects catalog SHA-256, reason when unavailable) for a run's image."""
+    from ..processing.catalogs import objects as dso
+    from ..processing.catalogs import registry as refreg
+    from ..services.worker import load_sky_solution
+
+    cfg = cfg_of(request)
+    run = _run(request, run_id)
+    asset = db_of(request).one("SELECT * FROM assets WHERE id=?", (run["asset_id"],))
+    if not asset:
+        return None, (), None, "This result's original is no longer available."
+    sol = load_sky_solution(cfg, asset)
+    if not sol or sol.get("status") not in ("verified", "solved"):
+        reason = (sol or {}).get("reason") or "Find where this image points on the sky first (All controls → Advanced → Sky position)."
+        return None, (), None, reason
+    if not refreg.group_ready(cfg.reference_data_dir, "objects"):
+        return sol, (), None, "Download the deep-sky object catalog in Settings → Reference data to label objects."
+    paths = tuple(str(refreg.installed(cfg.reference_data_dir, k)) for k in refreg.GROUPS["objects"])
+    digest = ",".join(refreg.DATA[k].sha256 for k in refreg.GROUPS["objects"])
+    return sol, dso.objects_from(paths), digest, None
+
+
+@router.post("/runs/{run_id}/edit-export/objects")
+async def edit_export_objects(request: Request, run_id: str, body: FramingIn) -> dict[str, Any]:
+    """Catalogued objects inside the framed area, for the annotation checklist."""
+    from ..processing.annotate import frame_geometry, objects_in_frame
+
+    sol, objs, _, reason = _annotation_context(request, run_id)
+    if sol is None:
+        return {"available": False, "compass_available": False, "reason": reason, "objects": []}
+    geo = frame_geometry(sol["height"], sol["width"], Framing(body.rotation, body.zoom, body.pan_x, body.pan_y))
+    found = await run_in_threadpool(objects_in_frame, sol, objs, geo, body.max_mag) if objs else []
+    return {
+        "available": bool(objs), "compass_available": True, "reason": reason,
+        "sky_solution": {k: sol.get(k) for k in ("status", "source", "center", "scale_arcsec")},
+        "objects": [{k: o[k] for k in ("name", "type", "common", "mag", "major_arcmin")} for o in found],
+    }
+
+
 @router.post("/runs/{run_id}/edit-export")
 async def edit_export(request: Request, run_id: str, body: EditExportIn, preview: bool = False):
+    from ..processing.annotate import Annotations, draw, frame_geometry
+
     _run(request, run_id)
     path = cfg_of(request).runs_dir / run_id / "display.npy"
     frame = Framing(body.rotation, body.zoom, body.pan_x, body.pan_y)
     target, label = _label_text(body.target), _label_text(body.label)
     lines = [text for text in (target, label) if text]
     jpeg = body.format == "jpeg"
-    metadata = None if preview else json.dumps(
-        {**body.model_dump(), "target": target, "label": label, "run_id": run_id, "export_engine": PIPELINE_VERSION},
-        ensure_ascii=True,
-    ).encode("ascii")
+    ann = Annotations(objects=body.annotations.objects, hidden=tuple(body.annotations.hidden), max_mag=body.annotations.max_mag,
+                      compass=body.annotations.compass, scale_bar=body.annotations.scale_bar)
+    overlay = None
+    objects_sha = None
+    if ann.any:
+        sol, objs, objects_sha, reason = _annotation_context(request, run_id)
+        if sol is None or (ann.objects and not objs):
+            raise ApiError(422, "ANNOTATIONS_UNAVAILABLE", reason or "Annotations are not available for this image.")
+
+        def overlay(image, max_edge):
+            return draw(image, sol, objs, frame_geometry(sol["height"], sol["width"], frame, max_edge), ann)
+
+    def metadata(drawn):
+        if preview:
+            return None
+        meta = {**body.model_dump(), "target": target, "label": label, "run_id": run_id, "export_engine": PIPELINE_VERSION}
+        if drawn is not None:
+            meta["annotations_drawn"] = drawn
+            meta["object_catalog_sha256"] = objects_sha
+            meta["sky_solution"] = "verified header WCS" if sol.get("status") == "verified" else "EasyAstroEnhance hinted solve"
+        return json.dumps(meta, ensure_ascii=True).encode("ascii")
 
     def render() -> bytes:
-        return render_edited(previews.open_display(path), frame, lines, jpeg=jpeg, metadata=metadata, preview=preview)
+        return render_edited(previews.open_display(path), frame, lines, jpeg=jpeg, metadata=metadata, preview=preview, overlay=overlay)
 
     try:
         data = await run_in_threadpool(render)

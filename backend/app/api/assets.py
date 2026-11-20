@@ -19,7 +19,7 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..db import new_id, now
-from ..models.api import BackgroundIn, InterpretationIn, LivePreviewIn, PresetPreviewsIn, RegionsIn
+from ..models.api import BackgroundIn, ImportIn, InterpretationIn, LivePreviewIn, PresetPreviewsIn, RegionsIn, SkySolveIn
 from ..processing.imagedata import ProcessingError
 from ..processing.catalog_color import MAX_BYTES, parse_catalog
 from ..processing.color import luminance
@@ -32,7 +32,7 @@ from ..processing.recipe import ObjectColorRecipe
 from ..processing.star_protection import detect_stars
 from ..services import previews
 from .common import (
-    ApiError, asset_hubble_input, cfg_of, coord_of, db_of, get_asset, run_worker_task, serialize_asset,
+    ApiError, asset_hubble_input, cfg_of, coord_of, db_of, get_asset, run_worker_task, serialize_asset, sky_solution_summary,
 )
 
 router = APIRouter(prefix="/assets", tags=["assets"])
@@ -121,6 +121,83 @@ async def upload_assets(request: Request, files: list[UploadFile]) -> dict[str, 
         db.insert("assets", row)
         if row["status"] == "inspecting":
             coord.enqueue_prepare(asset_id)
+        out.append(serialize_asset(db, coord, cfg, db.one("SELECT * FROM assets WHERE id=?", (asset_id,))))  # type: ignore[arg-type]
+    return {"assets": out}
+
+
+def _register(cfg, db, coord, asset_id: str, row: dict[str, Any], tmp: Path, asset_dir: Path) -> None:
+    """Shared by uploads and imports: detect the format, make the stored original read-only, inspect it, record the asset."""
+    try:
+        if row["size_bytes"] == 0:
+            raise ProcessingError("EMPTY_FILE", "This file is empty.")
+        fmt = detect_format(tmp)
+        final = asset_dir / f"original{_EXT[fmt]}"
+        tmp.replace(final)
+        final.chmod(stat.S_IREAD)  # originals are immutable
+        row.update(format=fmt, original_name=final.name)
+        inspection = inspect_file(final, cfg.max_pixels)
+        intake = evaluate_intake(inspection, {})
+        row.update(inspection=inspection, status="inspecting")
+        if intake["status"] == "unsupported":
+            row.update(status="failed", error={"code": intake.get("code"), "message": intake["message"]})
+    except ProcessingError as exc:
+        row.update(status="failed", error={"code": exc.code, "message": exc.message})
+    except Exception as exc:
+        row.update(status="failed", error={"code": "UPLOAD_FAILED", "message": "This file could not be added.", "detail": str(exc)})
+    db.insert("assets", row)
+    if row["status"] == "inspecting":
+        coord.enqueue_prepare(asset_id)
+
+
+IMPORT_SUFFIXES = {".fit", ".fits", ".fts", ".jpg", ".jpeg", ".tif", ".tiff"}
+
+
+def _copy_hashed(src: Path, dst: Path, limit: int) -> tuple[str, int]:
+    import hashlib
+
+    h, size = hashlib.sha256(), 0
+    with open(src, "rb") as fi, open(dst, "wb") as fo:
+        while block := fi.read(4 * 1024 * 1024):
+            size += len(block)
+            if size > limit:
+                raise ProcessingError("FILE_TOO_LARGE", f"This file is larger than {limit // (1024 * 1024)} MB.")
+            h.update(block)
+            fo.write(block)
+    return h.hexdigest(), size
+
+
+@router.post("/import")
+async def import_files(request: Request, body: ImportIn) -> dict[str, Any]:
+    """Add images by their path on this computer (for example the newest Seestar stack). The source file is only read;
+    a copy is kept by the app like an upload."""
+    cfg, db, coord = cfg_of(request), db_of(request), coord_of(request)
+    if len(body.paths) > cfg.max_files:
+        raise ApiError(413, "TOO_MANY_FILES", f"Add at most {cfg.max_files} files at a time.")
+    out: list[dict[str, Any]] = []
+    for raw in body.paths:
+        src = Path(raw.strip().strip('"'))
+        asset_id = new_id("a_")
+        asset_dir = cfg.assets_dir / asset_id
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        row: dict[str, Any] = {
+            "id": asset_id, "created_at": now(), "filename": clean_name(src.name), "status": "failed", "interpretation": {}, "regions": [],
+            "original_name": None, "format": None, "size_bytes": 0, "sha256": None, "inspection": None, "error": None,
+        }
+        tmp = asset_dir / "upload.tmp"
+        try:
+            if not src.is_absolute() or not src.is_file():
+                raise ProcessingError("FILE_NOT_FOUND", "That file does not exist or is not reachable.")
+            if src.suffix.lower() not in IMPORT_SUFFIXES:
+                raise ProcessingError("UNSUPPORTED_FILE", "Only FITS, JPEG and TIFF files can be added.")
+            digest, size = await run_in_threadpool(_copy_hashed, src, tmp, cfg.max_file_bytes)
+            row.update(size_bytes=size, sha256=digest)
+        except ProcessingError as exc:
+            row.update(error={"code": exc.code, "message": exc.message})
+            tmp.unlink(missing_ok=True)
+            db.insert("assets", row)
+            out.append(serialize_asset(db, coord, cfg, db.one("SELECT * FROM assets WHERE id=?", (asset_id,))))  # type: ignore[arg-type]
+            continue
+        await run_in_threadpool(_register, cfg, db, coord, asset_id, row, tmp, asset_dir)
         out.append(serialize_asset(db, coord, cfg, db.one("SELECT * FROM assets WHERE id=?", (asset_id,))))  # type: ignore[arg-type]
     return {"assets": out}
 
@@ -446,6 +523,23 @@ async def preset_previews(request: Request, asset_id: str, body: PresetPreviewsI
         "scale_factor": res["factor"],
         "note": "Quick look at reduced size; the full-resolution result can differ slightly.",
     }
+
+
+@router.post("/{asset_id}/sky-solution")
+async def solve_sky(request: Request, asset_id: str, body: SkySolveIn) -> dict[str, Any]:
+    """Check the file's WCS against catalog stars, or solve from its pointing hints (or typed coordinates / a target name).
+    Read-only for the original; the solution is stored with the image."""
+    a = get_asset(request, asset_id)
+    _require_ready(a)
+    hints = body.model_dump(exclude_none=True) or None
+    payload = {**_analysis_payload(cfg_of(request), a), "hints": hints}
+    await run_worker_task(request, "sky_solve", payload, timeout=300)
+    return sky_solution_summary(cfg_of(request), get_asset(request, asset_id)) or {"status": "unavailable"}
+
+
+@router.get("/{asset_id}/sky-solution")
+def get_sky_solution(request: Request, asset_id: str) -> dict[str, Any]:
+    return sky_solution_summary(cfg_of(request), get_asset(request, asset_id)) or {"status": "none"}
 
 
 @router.get("/{asset_id}/background/suggest")

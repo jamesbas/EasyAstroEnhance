@@ -159,13 +159,13 @@ frontend/ (React + TypeScript + Vite)         backend/app/
 * On the CPU, the pixel stages run on parallel tiles whose overlap covers every chained filter, so the result is
   bit-for-bit the same as one full-frame pass; independent analysis steps also run in parallel.
 
-### Processing method disclosure (engine 1.6.0, recipe schema 9 — one-button Enhance)
+### Processing method disclosure (engine 1.7.0, recipe schema 10 — one-button Enhance)
 
 Press **Enhance**. The default preset, **Auto**, measures each image (a bright extended core, faint extended signal,
-star density) on a small binned copy and applies one of the built-in looks — Bright core (HDR), Faint detail, Star
-field or Natural; the choice and its reasons are shown above the sliders and recorded in the report (the object's name
-is never used). You can also pick a **preset** yourself (Natural, Vivid, Faint detail, Bright core (HDR), Star field,
-Seestar match) or click **Preview presets on this image** for reduced-size quick looks of each. The panel opens in a
+star density) on a small binned copy and applies one of the built-in looks — Moon & planets, Bright core (HDR), Faint
+detail, Star field or Natural; the choice and its reasons are shown above the sliders and recorded in the report (the
+object's name is never used). You can also pick a **preset** yourself (Natural, Vivid, Faint detail, Bright core (HDR),
+Star field, Moon & planets, Seestar match) or click **Preview presets on this image** for reduced-size quick looks of each. The panel opens in a
 **Simple** view (Sky brightness, Stretch, Noise reduction); **All controls** adds Contrast/Pop, Color, Detail, **Star
 color** and a *Protect bright cores* switch plus the tools below. Moving a Look slider makes the settings your own
 (Custom). After a first result, changed settings are shown as a **Live preview (not saved)** in the viewer; **Save this
@@ -177,21 +177,25 @@ classical algorithms — see [improve-enhance.md](improve-enhance.md). No 8-bit 
 * **Linear (stacked TIFF/FITS confirmed “Linear stack”)** — two pixel groups with analysis in between:
   1. *Linear clean-up* (processed-linear array saved after this): **hot/cold pixel repair** (isolated one-pixel defects
      on faint background: a spike in one colour channel only, or a pixel far below all its neighbours; one-pixel spikes
-     in every channel may be stars and are never touched) → optional supervised background → automatic
-     low-order **gradient** model (robust polynomial on sky boxes; skipped with a reason when the target fills the
-     frame or the gradient is negligible) → **background neutralization** (per-channel sky offset to one shared
+     in every channel may be stars and are never touched) → **row/column banding repair** (only when the sky's
+     row or column means scatter clearly more than noise allows) → optional supervised background → automatic
+     **gradient** model (robust polynomial on sky boxes, or a flexible spline surface when the polynomial leaves a large
+     residual on a mostly empty field; skipped with a reason when the target fills the frame or the gradient is
+     negligible) → **background neutralization** (per-channel sky offset to one shared
      pedestal — an offset per channel, never a per-channel scale) → bounded **white balance from field stars**
      (median color of isolated, unsaturated stars; gains limited to ±25 %; skipped when unreliable, and for
      H-alpha/OIII dual-band stacks such as Seestar LP, whose stars are not white through the filter; not photometric
-     calibration) → optional **Richardson–Lucy deconvolution** (Advanced, off by default; star-measured Gaussian PSF,
-     damped, SNR-gated, star cores excluded) → **à trous wavelet noise reduction** (luminance + chroma, per-scale
+     calibration; or **Accurate star colours** from the Gaia catalog, below) → optional **Richardson–Lucy
+     deconvolution** (Advanced, off by default; Moffat PSF fitted to the stars, total-variation regularized, deringed,
+     SNR-gated, star cores excluded) or **AI sharpening** → **à trous wavelet noise reduction** (luminance + chroma, per-scale
      measured noise, structure/star/defect gated, coarse residual untouched).
   2. *Display*: **hyperbolic luminance stretch** `Ls = (asinh(D·L+b) − asinh(b)) / (asinh(D+b) − asinh(b))` with
      highlight convergence (bright cores fade to white instead of clipping), white point at the data maximum, D
      auto-solved so the brightest extended signal lands at 0.88 (0.96 with core protection off), then an MTF that puts
      the sky exactly on the Sky brightness level → gentler stretch inside confident star masks → HDR core compression
      (only when a bright extended core is found) → pop S-curve → manual tone → multiscale **detail** (noise- and
-     edge-gated) → SCNR green removal (only when green remains; never for dual-band stacks, where green carries OIII)
+     edge-gated) → **large-scale structure** (with Contrast/Pop above 0.3: the 64–256 px band of galaxy arms and nebula
+     filaments, gated above its noise and capped) → SCNR green removal (only when green remains; never for dual-band stacks, where green carries OIII)
      → protected saturation → **star color** (saturation of the existing colour inside the star mask only) → **star
      colour fringe reduction** (only when bright stars have a blue/violet ring measurably stronger than a wider ring
      around them; lowers that hue's saturation in the ring, keeping brightness).
@@ -209,11 +213,11 @@ classical algorithms — see [improve-enhance.md](improve-enhance.md). No 8-bit 
 * **Guardrail:** new black/white clipping (per-pixel transitions vs the original display; pixels already clipped in any
   channel of the original are not new) above 0.1 % halves the finishing strengths once and reruns; if still above, the
   result is flagged “review”.
+* **Moon & planets** (preset; Auto picks it for a bright disc with almost no stars, and always for a video stack): the
+  sky goes to black, the surface is kept in range instead of being lifted toward white, small-scale detail is
+  sharpened above the noise, the star stretch is off, and the Moon's colour is balanced on its own disc (a planet keeps
+  its colours).
 * **Not implemented by design:** generative processing, super-resolution, blind (hint-free) plate solving, and cubes.
-  *Approved but not yet implemented* (spec amendment 1.7, all new features): header-WCS verification and hinted plate
-  solving with built-in catalog colour, object annotations in Edit export, a new **AI sharpening** tool, Star size and
-  Starless/Stars layer exports. The three existing AI tools (background extraction, noise reduction, star separation
-  with Star brightness) are already available; see [AI tools (optional)](#ai-tools-optional).
 
 ### Optional color and stretch tools
 
@@ -232,10 +236,19 @@ opening any of them. Saved presets from recipe schemas 3–5 migrate with newly 
   thumbnail based on the original display; it is not an exact preview of the full enhancement. Enhance applies the
   adjustment after the regular display finishing. If stars cannot be protected reliably, the full run skips the
   adjustment and explains why. It never changes the processed-linear FITS.
-* **Catalog color:** on a solved, linear **broadband RGB FITS**, import a UTF-8 CSV with the header
+* **Sky position** (All controls → Advanced → Sky position, or under Star colour): click **Find on the sky** to check the
+  FITS file's own sky coordinates (WCS) against catalog stars, or work them out from the header's pointing and pixel
+  scale (a typed object name such as *M 31* also works). Needs the star catalog (Settings → **Reference data**, one
+  download). Offline: no plate-solving service or external program. Seestar stacks solve in a few seconds.
+* **Accurate star colours** (Star colour): one switch for linear broadband RGB FITS. The colour balance is fitted to the
+  Gaia-measured colours of the stars in the frame (through the sky position, found automatically when needed) instead
+  of assuming the average star is white. Relative colour calibration through a generic RGB passband model, not
+  camera-specific spectrophotometry; when the catalog or a sky position is missing, normal white balance runs and the
+  report says why.
+* **Use my own catalog** (Star colour): on a solved, linear **broadband RGB FITS**, import a UTF-8 CSV with the header
   `ra_deg,dec_deg,r_over_g,b_over_g`. Supply ICRS coordinates in degrees and **positive linear reference flux ratios**
-  in your intended RGB passbands, for stars in this field. Raw Gaia BP/RP magnitudes are not RGB ratios. The app
-  does not ship a catalog or solve the image. It uses the FITS sky solution (WCS) to cross-match isolated, unsaturated
+  in your intended RGB passbands, for stars in this field. Raw Gaia BP/RP magnitudes are not RGB ratios. It uses the
+  FITS sky solution (WCS) to cross-match isolated, unsaturated
   stars, requires at least eight consistent matches, and fits relative RGB gains. If the WCS, catalog or matches are
   insufficient, the report says why and the normal field-star white balance still runs if enabled. No network is
   used. Imported CSVs (up to 2 MiB) stay in the app's `color-catalogs` directory; presets reference them by SHA-256.
@@ -253,13 +266,14 @@ opening any of them. Saved presets from recipe schemas 3–5 migrate with newly 
 
 ### AI tools (optional)
 
-Under **AI tools** in the Enhancement panel, three switches are all off by default:
+Under **AI tools** in the Enhancement panel, four switches are all off by default:
 
 | Tool | Model (licence) | Replaces | Works on |
 |---|---|---|---|
 | AI background extraction | GraXpert background 1.0.1, 218 MB (CC BY-NC-SA 4.0) | automatic polynomial gradient | linear stacks |
 | AI noise reduction | GraXpert denoise 3.0.2, 478 MB (CC BY-NC-SA 4.0); strength = Noise reduction slider | wavelet noise reduction | all images |
 | AI star separation | Cosmic Clarity Dark Star 2.1 / 2.1c, 15 MB each (MIT) | star-mask blending | linear stacks |
+| AI sharpening | Cosmic Clarity Sharpen (stellar + non-stellar radius 1/2/4/8), 5 × 12 MB (MIT) | deconvolution | linear stacks |
 
 * **Downloading models:** the first time you switch a tool on, click **Download** next to it, or manage all models in
   Settings → AI models. On Windows, downloads use native certificate validation so Windows can retrieve missing
@@ -272,6 +286,9 @@ Under **AI tools** in the Enhancement panel, three switches are all off by defau
   24 seconds with AI off. Actual times depend on the hardware and the image.
   For comparison, **on the test PC's GPU** an 8 MP Seestar stack took about 1.5 s for background extraction,
   17 s for noise reduction, and 6–11 s for star separation. These are not CPU estimates.
+* **GPU memory:** loaded models stay ready while images are being processed (a batch reuses them) and are released,
+  with the GPU memory they hold (about 5 GB with background, noise reduction and star separation), once the app has
+  been idle for 60 seconds. The next AI run then reloads them (about 3 s).
 * **If a model is missing or fails:** the step is skipped with a reason and the classical step runs instead.
 * **Star separation:** on a confirmed linear stack, enable **AI star separation** to show **Star brightness**.
   At **100%** (the default) the app keeps its usual star blend. Set **1–99%** to dim the separated stars, or set
@@ -279,6 +296,16 @@ Under **AI tools** in the Enhancement panel, three switches are all off by defau
   especially large or saturated stars. This uses the same Dark Star model and changes only the enhanced display and
   its exports, not the original or the processed-linear FITS. The report records the applied setting or why it was
   skipped. Existing presets keep their saved setting; older presets without this control keep the usual blend.
+* **Star size** (with star separation): below 100% each separated star's glow is shrunk toward its core — centre,
+  colour and peak brightness kept, never brighter — in the enhanced display only. On a real M 31 stack the median star
+  width went from 5.9 px to 4.1 px at 70%.
+* **Starless / Stars layers:** after a run with star separation, **More formats** offers Starless and Stars-only PNGs
+  and linear FITS files (made when first downloaded; starless + stars equals the processed-linear data). Large or
+  saturated stars may remain partly in the starless layer. They are never part of Download all by default.
+* **AI sharpening:** sharpens fine structure and tightens stars blurred by seeing and focus; the strength slider sets
+  galaxy/nebula sharpening and Advanced → *AI star sharpening* sets the stars. It is gated so the sky noise is not
+  sharpened and saturated star cores pass through; the report gives the sky noise before and after. The models'
+  super-resolution variants are never used.
 * **Stretch safeguard:** AI denoised data are treated as at most 2× cleaner when the stretch is chosen. Without this,
   the solver over-stretched and amplified colour mottle.
 * **Processing report:** after the enhancement finishes, choose **More formats → Processing report (JSON)** below
@@ -317,9 +344,26 @@ stacking finishes* (off by default), so you can look at it and adjust the settin
 * Debayering and resampling use the NVIDIA GPU when available. Measured on the target PC: 77 Seestar S30 subs
   (1080 × 1920, 30 s) → 65 used (12 cloudy/blurred frames skipped with reasons), 0.40 px alignment RMS across 10° of
   field rotation, 906 hot pixels repaired, ≈ 20 s (2× drizzle: ≈ 105 s, 2160 × 3840).
+* **Mosaics** (Seestar `…_mosaic_sub` folders, or frames whose pointings differ): detected automatically (a checkbox in
+  the dialog can override). Frames are aligned through overlapping panels and the result covers every panel; frames
+  are graded against the frames pointing nearest to them. Uncovered corners stay empty — **Crop stacking edges** in
+  Edit export removes them. Measured: IC 1805 (84 subs, 52 used; the rest cloudy) → 2713 × 3113 in 50 s with no visible
+  seams.
+* **Moon, Sun and planet videos** (Seestar RAW `.avi`, with its `.avi.txt`): enter the video file instead of a folder,
+  or use Import from Seestar → *Stack video…*. Lucky imaging: every frame is graded for sharpness, the sharpest 25 %
+  (at least 20) are aligned and averaged. A real 1495-frame lunar video stacks in about 26 s. If the target was
+  over-exposed in the recording, a warning says so — that detail cannot be recovered. MP4 previews cannot be stacked.
 * Every stacked value is a weighted mean of measured, resampled pixels — nothing is synthesized. The stack report (frames
   used/rejected, calibration, alignment, weights, rejection, timings) is stored with the stack
   (`GET /api/v1/stacks/{id}` → `full_report`); a summary is in the FITS `HISTORY`.
+
+### Import from Seestar
+
+**Import from Seestar…** (top bar, or the start screen) finds your Seestar `MyWorks` folder (copied from the telescope
+or synced by the Seestar app; Browse… or paste the path if it isn't found) and lists your targets, newest first, with
+the newest stack's frames, exposure and filter. **Add newest stack** adds it in one click; **Stack sub-frames…** /
+**Stack mosaic…** / **Stack video…** open Stack frames already filled in with *Enhance automatically* on. Only folder and
+file names are read to build the list; the files are never changed.
 
 ### Input handling
 
@@ -346,6 +390,11 @@ black corners; zoom in to crop them. Zoom does not enlarge the exported pixels. 
 field rotation or mosaics), **Crop stacking edges** frames the largest clean area at the image's aspect ratio; it is
 only a suggestion and nothing is cropped unless you click it.
 
+**Annotations** (when the image's sky position is known — see *Sky position* above): **Label objects** draws the
+galaxies, nebulae and clusters of the OpenNGC catalog inside the framing (untick any you don't want; needs the object
+catalog from Settings → Reference data), **Compass** shows north and east, and **Scale bar** shows the angular scale.
+They are drawn only on this sharing copy.
+
 Enter optional **Label text** for a name, company or caption. **Include target name** fills in the FITS `OBJECT`
 name when available, or lets you enter one manually. The text is imprinted in the lower-left corner of the new
 image. Choose **PNG (16-bit)** or **JPEG (for sharing)**. This creates a separate copy of the enhanced display, not a
@@ -370,6 +419,8 @@ tests, and bump `PIPELINE_VERSION` if outputs change.
 | Port in use | `.\scripts\start.ps1 -Port 9000`. |
 | GPU shows “Processing: CPU” | Settings → **Check GPU setup**. “CuPy is not installed” → `.\scripts\setup-gpu.ps1`. “Failed to find CUDA headers” → the `[ctk]` extra is missing (re-run setup-gpu). Update the NVIDIA driver if the runtime is newer than the driver. CPU always works. |
 | “needs about X GB of memory” | The up-front estimate exceeded the RAM budget (default 60% of available). Close programs, or raise the memory fraction in Settings; a 100 MP linear RGB image needs tens of GB. |
+| “Download the star catalog…” under Sky position | Settings → **Reference data** → Download (once; internet needed only for the download). |
+| Sky position “not found” | The file has no pointing in its header (for example a JPEG): type the object name and click **Try with this name**. |
 | AI tool shows “Model not downloaded” | Click **Download** next to it (internet needed once), or Settings → AI models. The classical step is used until then. |
 | AI model download fails with a certificate error | Check the PC's date and time and install pending Windows updates. Open the model's source, [Hugging Face](https://huggingface.co/jromanghf/graxpert-models) or [GitHub](https://github.com/setiastro/cosmicclarity/releases), in a browser on the same PC. If it shows a certificate warning, don't bypass it. On a managed network, ask the administrator to check the trusted HTTPS proxy certificate. |
 | “This file needs debayering or stacking first” | Single raw/CFA frames cannot be enhanced on their own; use **Stack frames…** on their folder, or add the telescope’s stacked RGB/mono image. |

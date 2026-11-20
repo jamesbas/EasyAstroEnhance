@@ -428,6 +428,39 @@ H2 + H3 (plate solve, accurate colour, annotations), H4 (classical sharpening up
 H5 + H15 (star size, layer exports), H8/H9/H10 (banding, RBF gradients, large-scale structure), H12 (Seestar import),
 then H13/H14 (Moon/Sun, mosaics).
 
+> **Phase 3 status (November 20, 2026): done — engine 1.7.0, recipe schema 10, spec amendments 1.7 (implemented) and
+> 1.9 (new: H8–H14).** Backend 311 tests and Playwright 32 tests pass (new: `tests/unit/test_engine17.py`,
+> `tests/integration/test_reference_data_api.py`, layer and AI-sharpening tests in `test_ai.py`,
+> `frontend/tests/phase3.spec.ts`). Everything below was checked on your real stacks in `D:\Seestar\MyWorks`.
+>
+> * **H2 sky solution:** offline, hinted (header pointing/scale, a typed name or coordinates; no blind solving), with
+>   header-WCS verification. Star catalog: Gaia DR3 to G 13.5 (11.2 M stars, 135 MB), built reproducibly by
+>   `backend/tools/build_star_catalog.py`, to be published as the data-only release `reference-data-1`; object catalog
+>   OpenNGC. M 31, M 42, M 45 and C 22 solve in about 2 s at 0.4–0.55 px RMS. **H3:** **Accurate star colours** (one
+>   switch) fits colour gains to the Gaia colours of the stars in the frame — consistent across your IRCUT targets and
+>   with field-star white balance on M 31; Edit export gains **Label objects / Compass / Scale bar**.
+> * **H4:** classical deconvolution now fits a Moffat PSF with TV regularization and deringing (one PSF per frame; zone
+>   FWHM reported only); **AI sharpening** with the pinned Cosmic Clarity Sharpen models, SNR-gated (sky noise unchanged).
+> * **H5 + H15:** **Star size** (M 31 median star FWHM 5.9 → 4.1 px at 70 %), centroid- and peak-preserving, display only;
+>   **Starless / Stars** PNG and linear FITS layer exports on request. (H15 was not implemented before: star removal
+>   existed only as the 0 % Star brightness display.)
+> * **H8:** row/column banding repair, measurement-gated (left alone on all five real stacks). **H9:** a thin-plate spline
+>   gradient model, automatic only on mostly empty fields (on M 31/M 42/M 45 it would have eaten nebulosity) or chosen in
+>   Advanced. **H10:** large-scale structure on Contrast > 0.3 (Vivid), with a reduced negative lobe after review showed
+>   the plain band darkening M 31's outer disk.
+> * **H12:** **Import from Seestar** — finds MyWorks, lists targets newest first, **Add newest stack** in one click,
+>   **Stack sub-frames / mosaic / video** pre-filled with automatic enhancement.
+> * **H13:** **Moon & planets** preset (surface display mode, Moon disc colour balance, fine sharpening), chosen by Auto
+>   for bright, starless discs and every video stack; **lucky-imaging stacking of RAW AVI videos** (lunar: 1495 frames →
+>   374 used in 26 s). Your Jupiter recordings are over-exposed (42 % of the disc at full scale); the stack report now
+>   says so — lower the gain when recording planets.
+> * **H14:** **mosaic stacking** onto a canvas covering every panel, with chained registration and grading against
+>   nearby pointings (Seestar mosaics have ~2 frames per panel): IC 1805 → 2713 × 3113, NGC 7000 → 1337 × 2150.
+> * **Cost:** linear runs are ~1.2 s slower at 8.3 MP (banding check, large-scale band); optional tools cost time only
+>   when on ([docs/benchmarks.md](docs/benchmarks.md)).
+> * **Not done / limits:** blind solving, multi-point video alignment, MP4/SER video, mosaic seam blending, diagonal
+>   banding, spatially varying deconvolution PSF.
+
 ---
 
 ## 8. Overall rating

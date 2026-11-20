@@ -46,13 +46,15 @@ class FrameInfo:
     stack_count: int
     flip_rows: bool
     hdu: int = 0
+    ra: float | None = None  # header pointing (degrees); used to recognise mosaics
+    dec: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> "FrameInfo":
-        return FrameInfo(**{k: d[k] for k in FrameInfo.__dataclass_fields__})
+        return FrameInfo(**{k: d[k] for k in FrameInfo.__dataclass_fields__ if k in d})
 
 
 def _num(v) -> float | None:
@@ -117,6 +119,7 @@ def inspect_frame(path: Path) -> FrameInfo | str:
                         date_obs=(str(h.get("DATE-OBS")) if h.get("DATE-OBS") else None),
                         instrument=(str(h.get("INSTRUME")).strip() if h.get("INSTRUME") else None),
                         stack_count=int(_num(h.get("STACKCNT")) or 1), flip_rows=bool(flip), hdu=i,
+                        ra=_num(h.get("RA")), dec=_num(h.get("DEC")),
                     )
     except Exception as exc:  # unreadable/corrupt file: reported, never fatal for the scan
         return f"could not be read ({type(exc).__name__})"
@@ -231,3 +234,30 @@ def summarize(frames: list[FrameInfo]) -> dict[str, Any]:
         "total_exposure_s": float(sum(exps)) if any(exps) else None,
         "sub_frames": int(sum(f.stack_count for f in frames)), "nights": sorted(set(dates)),
     }
+
+
+MOSAIC_SPREAD_DEG = 0.1  # header pointings further apart than this are separate mosaic panels (dithering is arcminutes)
+
+
+def pointing_offsets(frames: list[FrameInfo]) -> np.ndarray | None:
+    """Per-frame header pointing offsets (degrees on the sky) from the median pointing, or None without RA/DEC."""
+    if not frames or any(f.ra is None or f.dec is None for f in frames):
+        return None
+    ra = np.array([f.ra for f in frames], np.float64)
+    dec = np.array([f.dec for f in frames], np.float64)
+    ra0, dec0 = float(np.median(ra)), float(np.median(dec))
+    dra = (ra - ra0 + 180.0) % 360.0 - 180.0
+    return np.column_stack([dra * np.cos(np.radians(dec0)), dec - dec0])
+
+
+def detect_mosaic(frames: list[FrameInfo]) -> tuple[bool, str]:
+    """A mosaic: frames named as mosaic sub-frames (Seestar ``*_mosaic_*``) or header pointings that spread over more
+    than ``MOSAIC_SPREAD_DEG``."""
+    if frames and sum("mosaic" in f.name.lower() for f in frames) > len(frames) / 2:
+        return True, "the sub-frames are named as mosaic frames"
+    off = pointing_offsets(frames)
+    if off is not None and len(off) > 1:
+        spread = float(np.hypot(*(off.max(axis=0) - off.min(axis=0))))
+        if spread > MOSAIC_SPREAD_DEG:
+            return True, f"the header pointings spread over {spread:.2f} degrees"
+    return False, ""

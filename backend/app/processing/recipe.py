@@ -16,16 +16,20 @@ Schema 9 (engine 1.6): Auto preset (``auto_preset``), automatic cosmetic correct
 (``auto.cosmetic``, ``auto.halo_reduction``) and a star color slider (``look.star_color``). Older recipes migrate with the
 two automatic stages on (like the other automatic stages, each measures the image and is skipped with a reason) and star
 color 0, so their look is unchanged except where those stages find defects or fringes.
+Schema 10 (engine 1.7): Accurate star colours from the built-in catalog (``catalog_builtin``), AI sharpening
+(``ai.sharpen``, ``ai.sharpen_amount``, ``ai.sharpen_stars``), Star size (``ai.star_size``), automatic banding reduction
+(``auto.banding``) and the gradient model choice (``advanced.gradient_model``). Older recipes migrate with the opt-in
+tools off and banding reduction on (measured; skipped when no banding is found).
 """
 from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-PIPELINE_VERSION = "1.6.0"
-RECIPE_SCHEMA_VERSION = 9
-MIGRATABLE_SCHEMAS = {3, 4, 5, 6, 7, 8}
+PIPELINE_VERSION = "1.7.0"
+RECIPE_SCHEMA_VERSION = 10
+MIGRATABLE_SCHEMAS = {3, 4, 5, 6, 7, 8, 9}
 
 Strength = Literal["gentle", "balanced", "strong"]
 
@@ -66,6 +70,7 @@ class AutoRecipe(_Strict):
     star_stretch: bool = True
     cosmetic: bool = True  # isolated colored hot pixels and cold pixels on faint background (linear stacks)
     halo_reduction: bool = True  # measured blue/violet/magenta fringe in a narrow ring around bright stars
+    banding: bool = True  # measured row/column banding (walking noise) on linear stacks
 
 
 class ToneRecipe(_Strict):
@@ -101,6 +106,9 @@ class AdvancedRecipe(_Strict):
     background_strength: float | None = Field(None, ge=0.0, le=1.0)
     deconvolution: bool = False
     deconvolution_iterations: int | None = Field(None, ge=1, le=50)
+    gradient_model: Literal["polynomial", "spline"] | None = None  # None: polynomial, or spline when its residual is large
+    fine_sharpen: float | None = Field(None, ge=0.0, le=1.0)  # Moon & planets: small-scale wavelet sharpening
+    surface_mode: bool = False  # Moon, Sun, planets: display anchored at the surface; Moon colour balanced on its disc
 
 
 class AIRecipe(_Strict):
@@ -110,6 +118,10 @@ class AIRecipe(_Strict):
     denoise: bool = False  # GraXpert denoising instead of wavelet denoise; strength = the Noise reduction slider
     stars: bool = False  # Dark Star separation: finish the starless image, add the stars back (linear only)
     star_brightness: float = Field(1.0, ge=0.0, le=1.0, description="Fraction of separated star brightness added back to the display")
+    star_size: float = Field(1.0, ge=0.5, le=1.0, description="Display size of the separated stars (1 = unchanged)")
+    sharpen: bool = False  # Cosmic Clarity Sharpen (non-stellar and stellar models)
+    sharpen_amount: float = Field(0.5, ge=0.0, le=1.0, description="Non-stellar sharpening strength")
+    sharpen_stars: float = Field(0.5, ge=0.0, le=1.0, description="Stellar sharpening strength (0 skips the stellar model)")
 
 
 class ObjectColorRecipe(_Strict):
@@ -144,7 +156,14 @@ class Recipe(_Strict):
     object_color: ObjectColorRecipe = ObjectColorRecipe()
     focus_stretch: FocusStretchRecipe = FocusStretchRecipe()
     catalog_sha256: str | None = Field(None, pattern=r"^[0-9a-f]{64}$")
+    catalog_builtin: bool = False  # Accurate star colours: built-in Gaia catalog through the image's sky solution
     hubble_strength: float = Field(0.0, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _one_catalog(self) -> "Recipe":
+        if self.catalog_builtin and self.catalog_sha256:
+            raise ValueError("Use either Accurate star colours (built-in catalog) or an imported reference catalog, not both.")
+        return self
 
 
 class RecipeCompatibilityError(ValueError):
@@ -176,6 +195,7 @@ BUILTIN_PRESET_NAMES = {
     "bright-core": "Bright core (HDR)",
     "star-field": "Star field",
     "seestar-match": "Seestar match",
+    "moon-planets": "Moon & planets",
 }
 DEFAULT_PRESET = "auto"
 
@@ -198,6 +218,14 @@ def builtin_presets() -> dict[str, Recipe]:
             advanced=AdvancedRecipe(star_stretch_amount=0.6),
         ),
         "seestar-match": Recipe(preset="seestar-match", look=LookRecipe(background=0.15, contrast=0.0, color=0.17, detail=0.0, noise=0.4)),
+        # Moon, Sun and planets (bright surfaces, few or no stars): a gentle stretch anchored at the surface (surface mode
+        # also turns the star stretch off: a planet would be softened like a star), no core compression, and small-scale
+        # wavelet sharpening instead of the Detail stage (which steps back from hard edges).
+        "moon-planets": Recipe(
+            preset="moon-planets", look=LookRecipe(background=0.04, stretch=-1.0, contrast=0.3, color=0.2, detail=0.0, noise=0.3,
+                                                   protect_cores=False),
+            advanced=AdvancedRecipe(fine_sharpen=0.6, stretch_log_d=0.5, surface_mode=True),
+        ),
     }
 
 
@@ -207,7 +235,7 @@ def no_operations_recipe() -> Recipe:
         preset="custom",
         look=LookRecipe(contrast=0.0, color=0.0, detail=0.0, noise=0.0, protect_cores=False),
         auto=AutoRecipe(neutralize=False, gradient=False, white_balance=False, green_removal=False, star_stretch=False,
-                        cosmetic=False, halo_reduction=False),
+                        cosmetic=False, halo_reduction=False, banding=False),
         tone=ToneRecipe(enabled=False),
         background=BackgroundRecipe(enabled=False),
         protect_regions=False,

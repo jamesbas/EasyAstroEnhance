@@ -14,7 +14,15 @@ Version 1.8 • November 20, 2026 • Prepared for Jaime Basilico
 > reduced-size quick looks; the panel opens in a **Simple** view; past settings can be restored; stacking folders can be
 > browsed; and Edit export offers **Crop stacking edges**. Fidelity rules 3 and 8 are clarified. See §4 "Amendment 1.8".
 
-> **Amendment 1.7 (approved scope, not yet implemented; each part ships with its own engine/recipe-schema bump).**
+> **Amendment 1.9 (engine 1.7.0, recipe schema 10, together with amendment 1.7).** Higher-end, still one-button:
+> automatic **row/column banding** repair; a flexible **spline gradient** model for complex light pollution; finishing
+> **large-scale structure** on stronger Contrast; classical **deconvolution** with a fitted Moffat PSF and TV
+> regularization; a **Moon & planets** preset (surface display mode) chosen by Auto; **lucky-imaging video stacking** of
+> Seestar RAW AVI recordings; **mosaic stacking** onto a canvas covering every panel; and **Import from Seestar** (a
+> read-only MyWorks browser with one-click "add newest stack" / "stack sub-frames" / "stack video"). See §4
+> "Amendment 1.9".
+
+> **Amendment 1.7 (implemented in engine 1.7.0, recipe schema 10).**
 > Four opt-in capabilities are added. Defaults and every built-in preset stay unchanged; each part is off until the
 > user enables it, is skipped with a recorded reason when it cannot run, and is disclosed per run.
 > **(A) Sky solution and built-in catalog colour:** verify a FITS header sky solution (WCS) against catalog stars, or
@@ -223,11 +231,39 @@ These constants apply to the rendered baseline only. They are not valid physical
 
 ### Amendment 1.7 — sky solution, catalog colour, annotations, AI sharpening, star size and layer exports
 
-Approved scope; not implemented in engine 1.5.0. Each part below is independent, may ship separately, increments
-`PIPELINE_VERSION` when it can change outputs, and adds its recipe fields in a new recipe schema (schema 8 recipes and
-saved presets migrate with every new field off or neutral). Built-in presets never enable any of them. Each part is
+Implemented in engine 1.7.0 with recipe schema 10, in one engine step together with amendment 1.9 (schema 3–9 recipes
+and saved presets migrate with every new field off or neutral). Built-in presets never enable any of them. Each part is
 disclosed in the processing report (requested, applied/skipped/inactive with a reason, parameters, timings) and, where
 applicable, in FITS `HISTORY`.
+
+*As built (engineering decisions recorded at implementation):*
+
+- **Star catalog:** Gaia DR3 stars with G < 13.5 (about 11 million), built by `backend/tools/build_star_catalog.py`
+  from the ESA Gaia archive (HEALPix-range queries split until none hits the anonymous 50 000-row cap) into the
+  `EAESTARS` format of `app/processing/catalogs/stars.py`: 1° declination zones split into right-ascension cells no
+  wider than 1°, brightest first, positions at J2016.0. Published as the data-only GitHub release `reference-data-1`
+  (no application release); credit and CC BY-SA 3.0 IGO licence are shown in Settings → Reference data.
+- **Object catalog:** OpenNGC `NGC.csv` and `addendum.csv` pinned at commit `be3cd6c`, CC BY-SA 4.0. Messier, NGC, IC
+  and Caldwell names (Caldwell from OpenNGC's identifiers) resolve typed target names.
+- **Solve:** header hints try the header pixel scale and also ½× and 2× (the Seestar S30 Pro header scale is off by a
+  factor of two); verification counts the brightest 50 *detected* stars (detection already excludes most saturated
+  stars; no separate saturation filter). Real Seestar stacks (M31, M42, M45, C 22) solve in about 2.5 s at 0.42–0.55 px
+  RMS; their header WCS verifies at 0.73–1.34 px. The sky-solve endpoint is synchronous (it returns the solution, not
+  a task ID) and runs in the worker with a 5-minute limit; with **Accurate star colours** on, a missing solution is
+  computed automatically at enhancement time.
+- **Colour transform:** BP−RP → effective temperature (dwarf sequence) → blackbody through Gaussian R/G/B passbands
+  centred at 610/535/465 nm, normalized so G2V (BP−RP 0.82) is white; BP−RP 0–2.5 used. When more than 3× the minimum
+  number of stars match, the fit uses the brighter half (at least 3× the minimum): faint stars' colours are mostly noise
+  in short stacks. On real Seestar S30 IRCUT stacks the fitted gains agree across targets (R 0.76–0.81, B 1.15–1.17 for
+  M 31, M 45 and a 4-frame C 22) and with field-star white balance on M 31 (within 0.03).
+- **AI sharpening:** the four non-stellar radius models plus the stellar model; the non-stellar radius is half the
+  measured median star FWHM, interpolated between the two nearest models.
+- **Star size:** at the requested size the star layer is eroded by a flat disc (radius 1–4 px from half the median
+  display FWHM of the separated stars) and each star's peak is restored by the ratio of local maxima before and after,
+  never above the original layer. On a real M 31 stack the median star FWHM went from 5.9 px to 4.1 px at 70 % and
+  2.8 px at 50 %.
+- **Layer exports** are deferred exports (made on first download) listed under **More formats**: Starless and Stars
+  PNG, Starless linear FITS and Stars linear FITS (processed-linear minus starless).
 
 **(A) Sky solution and built-in catalog colour ("Accurate star colours")**
 
@@ -400,6 +436,77 @@ gives a display identical to a fresh run and is not reused when linear settings 
 saved result; preset quick looks are cached and served only through the allow-listed file route; folder browsing is
 read-only and token-protected. Browser tests cover the Simple panel, Auto's explanation, live preview and saving it,
 restoring settings, quick looks and choosing a stacking folder by browsing.
+
+### Amendment 1.9 — higher-end one-button capabilities (engine 1.7.0, recipe schema 10)
+
+Implemented together with amendment 1.7. Every item is either measurement-gated (runs only when the image needs it,
+otherwise skipped with the reason) or explicitly chosen; nothing adds content that was not recorded.
+
+- **Row/column banding repair** (`auto.banding`, on; linear stacks, after the edge mask). Per channel, the mean of sky
+  pixels (within 3 σ of the median) along each row and column is detrended by a 65 px running median. The profile's
+  robust scatter must exceed 4× the scatter expected from noise alone (pixel noise × a measured spatial-correlation
+  factor ÷ √pixels per row) and 5 % of the pixel noise; only then are the detrended offsets subtracted. Diagonal
+  patterns are not handled. All five real Seestar stacks tested are left alone; synthetic read-out banding is removed.
+- **Spline gradient model** (`advanced.gradient_model`: automatic / polynomial / spline). A thin-plate RBF surface
+  through the sky boxes (evaluated on a 128 px grid) replaces the polynomial when chosen in Advanced, or automatically
+  only when the polynomial's residual at the sky boxes exceeds 4× the noise expectation, at least 40 boxes exist and at
+  least 80 % of the frame is empty sky — a flexible surface would otherwise follow faint nebulosity (on M 31, M 42 and
+  M 45 it would have removed real signal, so the polynomial stays).
+- **Large-scale structure** (no new control). When Contrast/Pop is above 0.3, a 64–256 px band (difference of Gaussians
+  σ 32/128 px on a 1/8-size copy) of the star-free display luminance is added, gated at 5 σ of that band's sky scatter,
+  with only a quarter of its negative lobe (the full lobe darkened M 31's outer disk and faint arms in review), capped
+  at ±0.05 display units, scaled by (Contrast − 0.3) / 0.7 and by the clipping guardrail. Reported as
+  `structure`.
+- **Classical deconvolution upgrade** (`advanced.deconvolution`, still off by default). The PSF is a Moffat profile
+  fitted to the stars (β bounded 1.2–10; kernel to 10⁻³ of the peak, radius ≤ 15 px); FWHM is also measured in a 3 × 3
+  grid of zones and reported (diagnostic only — one PSF is used for the whole frame). Richardson–Lucy runs with total
+  variation regularization (λ 0.002) and deringing that keeps values within the local minimum/maximum around stars, as a
+  full-frame stage so tiled and full-frame results stay bit-identical.
+- **Moon & planets** (built-in preset `moon-planets`; `advanced.surface_mode`, `advanced.fine_sharpen`). Surface mode
+  sets the sky to black, does not lift midtones, lowers the white point (never below the bright-surface level) until the
+  surface displays at 0.88, turns the star stretch off (a planet would be softened like a star) and — for the Moon only
+  (bright disc ≥ 5 % of the frame) — balances colour so the median of the bright, unsaturated disc is neutral (gains
+  0.5–2). Fine sharpening boosts the 1/2/4/8 px à-trous layers (gains 2.5/1.8/1.0/0.5 × amount) above 2 σ of the
+  measured noise, capped at 0.15. The clipping guardrail ignores the deliberately black sky. **Auto** picks Moon &
+  planets first when the image has fewer than 3 stars per megapixel and a bright core (≥ 0.05 %), or when the input is
+  the app's own video stack (`EAESTACK = 'video'`: the Seestar records video only of the Moon, Sun and planets).
+- **Lucky-imaging video stacking** (Stack frames… with a `.avi` path, or Import from Seestar → Stack video). Reads
+  uncompressed 8/16-bit Seestar RAW AVI files (OpenDML continuation included) and the `.avi.txt` sidecar (Bayer pattern,
+  object, date). Every frame is graded by the variance of the Laplacian of a 2 × 2-binned copy divided by its squared
+  mean; frames dimmer than 70 % of the median are dropped; the sharpest 25 % (at least 20) are aligned to the sharpest by
+  phase correlation with a sub-pixel peak (global translation only — no multi-point alignment), debayered and averaged.
+  The report records frames used, the alignment and the share of the target's bright pixels at full scale; above 5 % it
+  warns that the recording was over-exposed (detail there was never recorded). The result is a linear RGB FITS.
+- **Mosaic stacking** (detected from Seestar `…_mosaic_…` sub-frame names or header pointings spread over more than
+  0.1°; a checkbox in Stack frames… can override). The reference is the best frame of the central panel; frames that do
+  not match it are matched to aligned frames of the nearest pointings and their transforms chained. Star count, star
+  brightness and sky level are compared with the 9 frames pointing nearest (Seestar records about two frames per
+  panel), but against at least 0.6 × the session's star count and brightness, so a region of the sky that is genuinely
+  sparser is kept while a neighbourhood recorded through haze is still rejected. The
+  output canvas is the union of all aligned frames (at most 6 frames' area); uncovered pixels are empty and reported;
+  panels are levelled by the usual per-channel background offsets (no seam blending or per-panel gradient model).
+  Real data: NGC 7000 (6 subs, 2 panels) → 1337 × 2150 in 5 s; IC 1805 (84 subs, 41 panels) → 52 frames used (the
+  rest cloudy as the session ended), 2713 × 3113 in 50 s, no visible seams.
+- **Import from Seestar.** Finds the MyWorks folder (remembered, or the parent of a recently stacked `…_sub` folder, or
+  common locations on every drive), lists targets newest first from folder and file names only (`Stacked_…` /
+  `DSO_Stacked_…` names give frames, exposure, filter and time; `Lunar`, `Solar`, `Planetary` folders list videos), and
+  offers **Add newest stack** (the file is copied into the app like an upload; the original is only read), **Stack
+  sub-frames… / Stack mosaic…** and **Stack video…** (the stack dialog opens pre-filled with automatic enhancement on).
+
+**Fidelity notes.** A mosaic or video stack is an explicitly requested new image, like any stack; its field of view
+is what was recorded (rule 3 applies to enhancement). Banding repair, the spline gradient model and surface colour
+balance subtract or scale only smooth or one-dimensional backgrounds measured from the image itself. Fine sharpening and
+large-scale structure amplify only structure measured above the noise.
+
+**Tests** (`tests/unit/test_engine17.py`, `tests/unit/test_ai.py`): catalog round-trip and cones across RA 0 and the
+pole; hinted solving of a synthetic field in both parities to < 5″ and < 0.5 px; header-WCS verification accepts the
+true WCS and rejects a shifted one; the colour transform is monotonic with G2V white; banding is removed from
+synthetic read-out offsets and clean noise is untouched; Star size keeps centroids (≤ 0.1 px) and peaks, shrinks the
+half-maximum area and never brightens; layers recompose the display and keep the linear starless; AI sharpening with
+identity models changes nothing and is disclosed; surface mode neutralizes a colour-cast Moon, keeps the sky black
+and the disc unclipped with no star softening; a synthetic RAW AVI is read exactly and lucky stacking keeps the sharp
+half and aligns it; a 4-panel synthetic mosaic covers every panel with chaining; the Seestar scan groups targets and
+reads names only.
 
 ### Deferred
 
@@ -722,9 +829,12 @@ All endpoints below are local, versioned `/api/v1`. Use generated IDs rather tha
 | GET `/exports/{id}` | ZIP progress or download descriptor |
 | POST `/exports/{id}/cancel` | Stop building a ZIP; the partial file is removed |
 | DELETE `/assets/{id}` | Remove app-owned data after explicit UI action; never external files |
-| POST `/assets/{id}/sky-solution` | *(1.7)* Verify the header WCS or solve from hints (optional typed coordinates, field width or target name); returns a task ID |
+| POST `/assets/{id}/sky-solution` | *(1.7)* Verify the header WCS or solve from hints (optional typed coordinates, field width or target name); waits for the worker and returns the solution summary |
 | GET `/assets/{id}/sky-solution` | *(1.7)* Solution source, centre, scale, rotation, matches, RMS, or the reason none is available |
-| GET/POST/DELETE `/reference-data[/{id}]` | *(1.7)* List, download (pinned URL + SHA-256) or remove the star and object catalogs |
+| GET `/reference-data`; POST `/reference-data/{id}/download`, `/cancel`; DELETE `/reference-data/{id}` | *(1.7)* List, download (pinned URL + SHA-256), cancel or remove the star and object catalogs (`{id}` may be a group: `stars`, `objects`) |
+| POST `/runs/{id}/edit-export/objects` | *(1.7)* Catalogued objects inside an Edit export framing, and whether labels / compass are available |
+| POST `/assets/import` | *(1.9)* Add images by local path (read-only source, copied like an upload) |
+| POST `/stacks/seestar` | *(1.9)* Read-only summary of a Seestar MyWorks folder by target (remembered or found automatically) |
 | POST/GET/DELETE `/assets/{id}/live-preview` | *(1.8)* Start (latest wins), poll or cancel a live preview of a recipe; nothing is saved |
 | GET `/assets/{id}/live-preview/{live_id}` | *(1.8)* The live preview image (enhanced or fixed-mapping variant, optional ROI) |
 | POST `/assets/{id}/preset-previews` | *(1.8)* Reduced-size quick-look thumbnails for up to 16 recipes |

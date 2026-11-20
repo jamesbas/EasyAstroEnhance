@@ -182,6 +182,108 @@ def _large_scale(s: np.ndarray) -> np.ndarray:
     return resize_linear(small, h, w)
 
 
+# ---------------------------------------------------------------------------------------------- sharpen
+# Cosmic Clarity Sharpen (SetiAstroCosmicClarity.py, luminance mode "Both"): 16 px median border; unlinked midtone
+# stretch to median 0.25 when the data are dark (median < 0.08); BT.601 luminance; 256 px chunks with 64 px overlap whose
+# 16 px borders are ignored and overlaps averaged; stellar model first, blended by its amount; then the non-stellar model
+# (radius 1/2/4/8, interpolated between the two nearest) on that result, blended by its amount; chrominance restored.
+CC_TILE, CC_OVERLAP, CC_BORDER, CC_BATCH = 256, 64, 16, 4
+CC_STRETCH_BELOW = 0.08
+CC_RADII = (1, 2, 4, 8)
+
+
+def cc_radius_models(radius: float) -> tuple[tuple[int, int], float]:
+    """The two non-stellar models around ``radius`` (clamped to 1..8) and the interpolation weight of the larger."""
+    r = float(np.clip(radius, CC_RADII[0], CC_RADII[-1]))
+    for lo, hi in zip(CC_RADII, CC_RADII[1:]):
+        if r <= hi:
+            return ((lo, hi), (r - lo) / (hi - lo)) if r > lo else ((lo, lo), 0.0)
+    return (CC_RADII[-1], CC_RADII[-1]), 0.0
+
+
+def _cc_stitch(plane: np.ndarray, run: Callable[[np.ndarray], np.ndarray], check=None, progress=None) -> np.ndarray:
+    h, w = plane.shape
+    step = CC_TILE - CC_OVERLAP
+    coords = [(i, j) for i in range(0, h, step) for j in range(0, w, step)]
+    acc = np.zeros((h, w), np.float32)
+    wsum = np.zeros((h, w), np.float32)
+    for k in range(0, len(coords), CC_BATCH):
+        if check:
+            check()
+        group = coords[k: k + CC_BATCH]
+        batch = np.zeros((len(group), CC_TILE, CC_TILE, 3), np.float32)
+        sizes = []
+        for n, (i, j) in enumerate(group):
+            chunk = plane[i:i + CC_TILE, j:j + CC_TILE]
+            batch[n, :chunk.shape[0], :chunk.shape[1], :] = chunk[..., None]
+            sizes.append(chunk.shape)
+        out = run(batch)[..., 0]
+        for (i, j), (ch, cw), o in zip(group, sizes, out):
+            bh, bw = min(CC_BORDER, ch // 2), min(CC_BORDER, cw // 2)
+            acc[i + bh:i + ch - bh, j + bw:j + cw - bw] += o[bh:ch - bh, bw:cw - bw]
+            wsum[i + bh:i + ch - bh, j + bw:j + cw - bw] += 1
+        if progress:
+            progress(min(1.0, (k + len(group)) / len(coords)))
+    return acc / np.maximum(wsum, 1)
+
+
+def sharpen(x: np.ndarray, valid: np.ndarray, stellar: Callable | None, nonstellar: dict[int, Callable], radius: float,
+            stellar_amount: float, nonstellar_amount: float, check=None, progress=None) -> tuple[np.ndarray, dict[str, Any]]:
+    img = _as3(x).astype(np.float32)
+    c = img.shape[2]
+    v = valid if valid.any() else np.ones(valid.shape, bool)
+    lo = float(np.min(img[v]))
+    hi = max(float(np.max(img[v])), lo + 1e-6)
+    r = np.clip((img - lo) / (hi - lo), 0.0, 1.0)
+    r = _filled(r, valid, np.median(r[v], axis=0))
+    r = np.pad(r, ((CC_BORDER, CC_BORDER), (CC_BORDER, CC_BORDER), (0, 0)), mode="constant", constant_values=float(np.median(r)))
+    stretched = bool(np.median(r - r.min()) < CC_STRETCH_BELOW)
+    m = _midtone_for(np.median(r, axis=(0, 1)), 0.25) if stretched else None
+    s = _mtf(m, r) if stretched else r
+    if c == 3:
+        Y = 0.299 * s[..., 0] + 0.587 * s[..., 1] + 0.114 * s[..., 2]
+        Cb = -0.168736 * s[..., 0] - 0.331264 * s[..., 1] + 0.5 * s[..., 2]
+        Cr = 0.5 * s[..., 0] - 0.418688 * s[..., 1] - 0.081312 * s[..., 2]
+    else:
+        Y = s[..., 0]
+    passes = (1 if stellar is not None and stellar_amount > 0 else 0) + (1 if nonstellar_amount > 0 else 0) * len(set(nonstellar))
+    done = [0]
+
+    def sub_progress(f: float) -> None:
+        if progress:
+            progress(min(1.0, (done[0] + f) / max(passes, 1)))
+
+    if stellar is not None and stellar_amount > 0:
+        Y = Y + stellar_amount * (_cc_stitch(Y, stellar, check, sub_progress) - Y)
+        done[0] += 1
+    (rlo, rhi), wt = cc_radius_models(radius)
+    if nonstellar_amount > 0:
+        out = _cc_stitch(Y, nonstellar[rlo], check, sub_progress)
+        done[0] += 1
+        if rhi != rlo:
+            out = (1 - wt) * out + wt * _cc_stitch(Y, nonstellar[rhi], check, sub_progress)
+            done[0] += 1
+        Y = Y + nonstellar_amount * (out - Y)
+    Y = np.clip(Y, 0.0, 1.0)
+    if c == 3:
+        rgb = np.stack([Y + 1.402 * Cr, Y - 0.344136 * Cb - 0.714136 * Cr, Y + 1.772 * Cb], -1)
+        out_s = np.clip(rgb, 0.0, 1.0)
+    else:
+        out_s = Y[..., None]
+    if stretched:
+        out_s = _mtf(1.0 - m, out_s)  # exact inverse of the stretch
+    out_s = out_s[CC_BORDER:-CC_BORDER, CC_BORDER:-CC_BORDER]
+    res = (out_s * (hi - lo) + lo).astype(np.float32)
+    res = np.where(valid[..., None], res, img).astype(np.float32)
+    info = {"tile_px": CC_TILE, "overlap_px": CC_OVERLAP, "ignored_tile_border_px": CC_BORDER,
+            "temporary_stretch": "unlinked midtone stretch to median 0.25, inverted exactly" if stretched else "none (data already bright)",
+            "channels": "BT.601 luminance only (chrominance kept)" if c == 3 else "monochrome",
+            "stellar_amount": stellar_amount if stellar is not None else 0.0, "nonstellar_amount": nonstellar_amount,
+            "nonstellar_radius": float(np.clip(radius, 1, 8)), "nonstellar_models": [rlo, rhi] if rhi != rlo else [rlo],
+            "interpolation_weight": wt}
+    return (res if x.ndim == 3 else res[..., 0]), info
+
+
 def timed(info: AIStepInfo, fn):
     t0 = time.perf_counter()
     out = fn()

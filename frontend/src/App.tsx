@@ -14,10 +14,12 @@ import { RunHistory } from './components/RunHistory';
 import { SettingsDialog } from './components/SettingsDialog';
 import { StackBanner } from './components/StackBanner';
 import { StackDialog } from './components/StackDialog';
+import { SeestarImportDialog } from './components/SeestarImportDialog';
 import { StackInfo } from './components/StackInfo';
 import { UploadPanel } from './components/UploadPanel';
 import { useBgDrafts } from './hooks/useBgDrafts';
 import { useAIModels } from './hooks/useAIModels';
+import { useReferenceData } from './hooks/useReferenceData';
 import { useAppVersion } from './hooks/useAppVersion';
 import { useCompute } from './hooks/useCompute';
 import { useLivePreview } from './hooks/useLivePreview';
@@ -53,6 +55,7 @@ export default function App() {
   const reportError = useCallback((err: unknown) => notifyError(err), [notifyError]);
   const rec = useRecipe(reportError);
   const aiModels = useAIModels(reportError);
+  const referenceData = useReferenceData(reportError);
   const sel = useSelection(assets);
   const { choose } = sel;
   const drafts = useBgDrafts();
@@ -61,6 +64,8 @@ export default function App() {
   const [uploading, setUploading] = useState<{ progress: number; count: number } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [stackOpen, setStackOpen] = useState(false);
+  const [stackFrom, setStackFrom] = useState<string | null>(null);
+  const [seestarOpen, setSeestarOpen] = useState(false);
   const [mixOpen, setMixOpen] = useState(false);
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
   const [forced, setForced] = useState<ForcedIntake | null>(null);
@@ -160,7 +165,8 @@ export default function App() {
         if (s.state === 'succeeded' && s.report) {
           const r = s.report;
           const skipped = r.frames_total - r.frames_used;
-          notify('success', `Stacked ${r.frames_used} frame${r.frames_used === 1 ? '' : 's'} of ${s.name}${skipped ? ` (${skipped} poor or unaligned frame${skipped === 1 ? '' : 's'} skipped)` : ''}.${s.auto_enhance ? ' Enhancing now.' : ' Adjust the settings, then Enhance.'}`);
+          notify('success', `Stacked ${r.frames_used} frame${r.frames_used === 1 ? '' : 's'} of ${s.name}${skipped ? ` (${skipped} poor or unaligned frame${skipped === 1 ? '' : 's'} skipped)` : ''}.${r.mosaic ? ` Mosaic ${r.mosaic.canvas[0]} × ${r.mosaic.canvas[1]}.` : ''}${s.auto_enhance ? ' Enhancing now.' : ' Adjust the settings, then Enhance.'}`);
+          if (r.saturation?.warning) notify('error', r.saturation.warning);
           if (s.asset_id) {
             upsert([await api.getAsset(s.asset_id)]);
             choose([s.asset_id], s.asset_id);
@@ -396,7 +402,8 @@ export default function App() {
         {hasAssets ? <h1 className="brand">EasyAstroEnhance</h1> : <span />}
         <div className="topbar-actions">
           {hasAssets && <UploadPanel variant="compact" onFiles={(f) => void handleFiles(f)} uploading={uploading !== null} />}
-          {hasAssets && <button type="button" className="btn" onClick={() => setStackOpen(true)} data-testid="stack-button">Stack frames…</button>}
+          {hasAssets && <button type="button" className="btn" onClick={() => setSeestarOpen(true)} data-testid="seestar-button">Import from Seestar…</button>}
+          {hasAssets && <button type="button" className="btn" onClick={() => { setStackFrom(null); setStackOpen(true); }} data-testid="stack-button">Stack frames…</button>}
           {assets.filter(isLinearFits).length >= 2 && <button type="button" className="btn" onClick={() => setMixOpen(true)}>Combine channels…</button>}
           {appVersion && (
             <span className="version-chip" data-testid="app-version" title={`EasyAstroEnhance version ${appVersion.version} (processing engine; recipe schema ${appVersion.recipeSchema}; stacking ${appVersion.stackVersion})`}>
@@ -435,7 +442,8 @@ export default function App() {
 
       <main className="main">
         {!hasAssets ? (
-          ws.loaded ? <UploadPanel variant="empty" onFiles={(f) => void handleFiles(f)} uploading={uploading !== null} onStack={() => setStackOpen(true)} /> : <p className="muted pad">Loading…</p>
+          ws.loaded ? <UploadPanel variant="empty" onFiles={(f) => void handleFiles(f)} uploading={uploading !== null} onStack={() => { setStackFrom(null); setStackOpen(true); }}
+            onSeestar={() => setSeestarOpen(true)} /> : <p className="muted pad">Loading…</p>
         ) : (
           <div className="workspace">
             <ImageQueue
@@ -509,6 +517,7 @@ export default function App() {
               edit={rec.edit}
               setAI={rec.setAI}
               aiModels={aiModels}
+              referenceData={referenceData}
               selectPreset={rec.selectPreset}
               savePreset={async (name) => { await rec.savePreset(name); notify('success', `Saved preset “${name}”.`); }}
               reloadPresets={async () => { await rec.reloadPresets(); }}
@@ -563,12 +572,35 @@ export default function App() {
           onCompute={compute.setCompute}
           version={appVersion}
           aiModels={aiModels}
+              referenceData={referenceData}
           busyJobs={busyJobs}
           onHistoryCleared={() => { void refresh(); setSettingsOpen(false); }}
         />
       )}
+      {seestarOpen && (
+        <SeestarImportDialog
+          onClose={() => setSeestarOpen(false)}
+          onImported={(added) => {
+            upsert(added);
+            const usable = added.filter((a) => a.status !== 'failed');
+            if (usable.length) {
+              choose(usable.map((a) => a.id), usable[0].id);
+              setSeestarOpen(false);
+              notify('success', `Added ${usable.map((a) => a.filename).join(', ')}.`);
+            }
+            void refresh();
+          }}
+          onStack={(path) => {
+            setSeestarOpen(false);
+            setStackFrom(path);
+            setStackOpen(true);
+          }}
+        />
+      )}
       {stackOpen && (
         <StackDialog
+          initialFolder={stackFrom}
+          initialAutoEnhance={stackFrom !== null}
           recipe={rec.recipe}
           presetId={rec.recipe && rec.recipe.preset !== 'custom' ? rec.recipe.preset : null}
           settingsLabel={rec.presets.find((p) => p.id === rec.presetId)?.name ?? 'custom settings'}

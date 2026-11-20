@@ -3,7 +3,8 @@ import type {
   BatchIncludeKind, ComputeInfo, ComputePatchBody, ExportStatus, HistorySummary, Interpretation, Job, JobCreateBody,
   JobCreated, JobList, Preset, PresetList, Recipe, Rect, RunDetail, RunList, Session, StarMaskResult, UploadResult,
   ApiErrorBody, Stack, StackCreateBody, StackFolders, StackList, StackPlan, AIOverview,
-  EditExportBody, FolderListing, LivePreview, PresetPreviews,
+  EditExportBody, FolderListing, LivePreview, PresetPreviews, FramedObjects, ReferenceDataOverview, SeestarScan,
+  SkySolutionSummary, SkySolveBody,
 } from './types';
 
 export const API = '/api/v1';
@@ -168,6 +169,8 @@ export const api = {
   previewBackground: (id: string, body: BackgroundBody) => request<BackgroundPreview>('POST', `/assets/${id}/background/preview`, body),
   confirmBackground: (id: string, body: BackgroundBody) => request<Asset>('PUT', `/assets/${id}/background`, body),
   starMask: (id: string) => request<StarMaskResult>('GET', `/assets/${id}/star-mask`),
+  solveSky: (id: string, body: SkySolveBody) => request<SkySolutionSummary>('POST', `/assets/${id}/sky-solution`, body),
+  importPaths: (paths: string[]) => request<UploadResult>('POST', '/assets/import', { paths }),
   // live preview of the current settings (never saved) and quick-look preset thumbnails
   startLivePreview: (id: string, recipe: Recipe) => request<LivePreview>('POST', `/assets/${id}/live-preview`, { recipe }),
   livePreview: (id: string) => request<LivePreview>('GET', `/assets/${id}/live-preview`),
@@ -184,9 +187,15 @@ export const api = {
   downloadAI: (key: string) => request<AIOverview>('POST', `/ai/models/${key}/download`),
   cancelAI: (key: string) => request<AIOverview>('POST', `/ai/models/${key}/cancel`),
   deleteAI: (key: string) => request<AIOverview>('DELETE', `/ai/models/${key}`),
+
+  referenceData: () => request<ReferenceDataOverview>('GET', '/reference-data'),
+  downloadReference: (key: string) => request<ReferenceDataOverview>('POST', `/reference-data/${key}/download`),
+  cancelReference: (key: string) => request<ReferenceDataOverview>('POST', `/reference-data/${key}/cancel`),
+  deleteReference: (key: string) => request<ReferenceDataOverview>('DELETE', `/reference-data/${key}`),
   // stacking (folders are read, never written)
   scanStack: (body: StackFolders) => request<StackPlan>('POST', '/stacks/scan', body),
   browseFolders: (path: string | null) => request<FolderListing>('POST', '/stacks/browse', { path }),
+  scanSeestar: (path: string | null) => request<SeestarScan>('POST', '/stacks/seestar', { path }),
   createStack: (body: StackCreateBody) => request<Stack>('POST', '/stacks', body),
   listStacks: (active: boolean) => request<StackList>('GET', `/stacks${active ? '?active=true' : ''}`),
   getStack: (id: string) => request<Stack>('GET', `/stacks/${id}`),
@@ -196,6 +205,8 @@ export const api = {
   listRuns: (assetId: string) => request<RunList>('GET', `/runs?asset_id=${encodeURIComponent(assetId)}`),
   getRun: (id: string) => request<RunDetail>('GET', `/runs/${id}`),
   editExportTarget: (id: string) => request<{ target: string | null }>('GET', `/runs/${id}/edit-export/target`),
+  framedObjects: (id: string, framing: { rotation: number; zoom: number; pan_x: number; pan_y: number }) =>
+    request<FramedObjects>('POST', `/runs/${id}/edit-export/objects`, framing),
   editExport: async (id: string, body: EditExportBody, preview: boolean, signal?: AbortSignal) =>
     (await postFileOrPreview(`/runs/${id}/edit-export?preview=${preview}`, JSON.stringify(body), signal)).blob(),
   // presets

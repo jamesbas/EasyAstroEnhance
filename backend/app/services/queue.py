@@ -351,8 +351,21 @@ class Coordinator:
             "strip_location": bool(settings.get("strip_location", True)),
             "ai_models": self.ai_model_state(recipe, asset),
             "catalog_available": bool(parsed.catalog_sha256 and (self.cfg.color_catalog_dir / f"{parsed.catalog_sha256}.csv").is_file()),
+            "sky_solution": self.sky_state(asset) if parsed.catalog_builtin else None,
         }
         return hashlib.sha256(json.dumps(material, sort_keys=True, default=str).encode()).hexdigest()
+
+    def sky_state(self, asset: dict[str, Any]) -> list[Any]:
+        """The star catalog and stored sky solution an Accurate-star-colours run would use (a later solve or download
+        must not reuse a run made without them)."""
+        from ..processing.catalogs import registry as refreg
+
+        p = self.cfg.assets_dir / asset["id"] / "sky-solution.json"
+        try:
+            sol = hashlib.sha256(p.read_bytes()).hexdigest()
+        except OSError:
+            sol = None
+        return [sol, refreg.installed(self.cfg.reference_data_dir, "stars-gaia-dr3") is not None]
 
     def ai_model_state(self, recipe: dict[str, Any], asset: dict[str, Any]) -> dict[str, str | None]:
         """Which AI model file each enabled AI tool would use (a later download must not reuse a run that skipped it)."""

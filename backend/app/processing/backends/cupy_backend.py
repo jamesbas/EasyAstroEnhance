@@ -8,6 +8,7 @@ from .base import (
     Backend,
     BackendUnavailable,
     RecoverableBackendError,
+    disk_footprint,
     sigma_tuple,
 )
 
@@ -60,6 +61,17 @@ class CupyBackend(Backend):
         return self._nd.gaussian_filter(
             a, sigma_tuple(a.ndim, sigma), mode="reflect", truncate=GAUSSIAN_TRUNCATE
         )
+
+    def erode_disk(self, a, radius: int):
+        if radius <= 0:
+            return a
+        return self._nd.grey_erosion(a, footprint=self.cp.asarray(disk_footprint(radius, a.ndim)), mode="nearest")
+
+    def convolve2d(self, a, kernel: np.ndarray):
+        from cupyx.scipy.signal import fftconvolve
+
+        r = kernel.shape[0] // 2
+        return fftconvolve(self.cp.pad(a, r, mode="reflect"), self.cp.asarray(kernel, dtype=a.dtype), mode="valid").astype(a.dtype, copy=False)
 
     def synchronize(self) -> None:
         self.cp.cuda.Stream.null.synchronize()

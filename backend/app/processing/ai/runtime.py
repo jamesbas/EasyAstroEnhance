@@ -1,6 +1,8 @@
 """ONNX Runtime sessions for the AI tools: GPU (DirectML on Windows, CUDA elsewhere) first, CPU as the fallback.
 
-Sessions are cached per worker process (loading the 450 MB denoise model takes seconds). A failure on the GPU provider
+Sessions are cached per worker process while it is busy (loading the 450 MB denoise model takes seconds, and a batch
+reuses them); the worker drops them - and the GPU memory DirectML/CUDA keeps for each model, several GB in total - once
+it has been idle for a minute (``services.worker.AI_IDLE_RELEASE_S``). A failure on the GPU provider
 drops that session and repeats the work on the CPU provider; the fallback is recorded in the run report.
 """
 from __future__ import annotations
@@ -60,9 +62,21 @@ def _session(path: Path, provider: str):
         return s
 
 
-def drop_sessions() -> None:
+def drop_sessions() -> bool:
+    """Release every cached session (and the GPU memory its provider holds). Returns True if any were cached."""
     with _lock:
+        had = bool(_sessions)
         _sessions.clear()
+    if had:
+        import gc
+
+        gc.collect()  # sessions are freed when the last reference goes; collect any cycles holding one
+    return had
+
+
+def has_sessions() -> bool:
+    with _lock:
+        return bool(_sessions)
 
 
 class Runner:

@@ -16,8 +16,8 @@ I processed this with EasyAstroEnhance, a local app for bringing out faint detai
 with a JPEG, TIFF, or a stacked FITS from my telescope, or combine individual exposures or stacks from several
 nights first.
 
-I pick a preset and click **Enhance**. The app can even out the sky background, reduce noise, and brighten faint
-structure. I can fine-tune the contrast, colour, and detail, then compare before and after and save a new image.
+I click **Enhance**. The default **Auto** preset looks at the image and picks a suitable style. The app can even out
+the sky background, reduce noise, and brighten faint structure. I can fine-tune the contrast, colour, and detail, then compare before and after and save a new image.
 My originals are never changed or uploaded. Optional AI cleanup is off by default, and the app doesn't add stars
 or borrow detail from other photos.
 
@@ -39,6 +39,11 @@ combine them first. Everything runs locally and leaves my original files alone.
   data; drizzle uses the captured frames, not AI upscaling.
 - **Several nights:** I can combine already-stacked FITS images of the same target. The app aligns them even if the
   image scales differ and gives stacks with more exposure time more weight.
+- **Mosaics:** a Seestar mosaic `_sub` folder is recognised, and the result covers every panel.
+- **Moon, Sun and planet videos:** for a Seestar RAW video (`.avi`), the app keeps the sharpest quarter of the frames,
+  lines them up and averages them (lucky imaging). It warns me if the recording itself was over-exposed.
+- **Import from Seestar…** lists my Seestar `MyWorks` targets, newest first, so I can add the telescope's newest
+  stack in one click or start stacking its sub-frames, mosaic or video.
 
 Stacking adds a new, unbrightened (linear) FITS to the image queue. Enhancement is a separate step unless I tick
 **Enhance automatically when stacking finishes**.
@@ -56,8 +61,10 @@ enhancing. JPEGs use the already-processed workflow.
 - **Already processed:** A JPEG or a previously stretched TIFF or FITS gets gentler brightness and contrast
   adjustments, background colour correction, and noise reduction rather than a full linear stretch.
 
-I can choose **Natural**, **Vivid**, **Faint detail**, **Bright core (HDR)**, **Star field**, or **Seestar match** and
-fine-tune with the sliders. If too many pixels become newly pure black or white, the app backs off the finishing
+**Auto** (the default) measures the image — a bright core, faint nebulosity, a dense star field, or a bright disc
+like the Moon — and chooses a preset; it never uses the object's name. I can also choose **Natural**, **Vivid**,
+**Faint detail**, **Bright core (HDR)**, **Star field**, **Moon & planets** or **Seestar match** myself and fine-tune
+with the sliders. With **Live preview** on, slider changes show on the image before I save a new result. If too many pixels become newly pure black or white, the app backs off the finishing
 adjustments and retries once. If clipping is still above its limit, it flags the result for review.
 
 ### Optional colour and stretch tools
@@ -67,16 +74,17 @@ adjustments and retries once. If clipping is still above its limit, it flags the
   infer a missing sulfur channel. Regular broadband images aren't eligible for this button.
 - **Object Color** lets me adjust selected colour ranges in the galaxy or nebula. **Manual focus** lets me choose
   which brightness range gets the strongest stretch on a linear image.
-- For prepared FITS data, **Combine channels…** can mix separate filter stacks into a new linear image. Optional
-  catalog colour matching can refine relative RGB balance on a broadband image that already has a sky-coordinate
-  solution, using a reference-star file I supply. The app doesn't solve the image or download a star catalog.
+- For prepared FITS data, **Combine channels…** can mix separate filter stacks into a new linear image.
+- **Accurate star colours** sets the colour balance from the measured colours of catalog stars (ESA Gaia) in the frame,
+  instead of assuming the average star is white. The app first works out where the image points on the sky from the
+  FITS header and the stars themselves, offline, after a one-time optional catalog download.
 
 This is display enhancement, not absolute scientific calibration. Sharper-looking detail doesn't mean the telescope
 recorded more resolution.
 
 ### Optional AI cleanup
 
-All three tools are **off by default**. If I turn one on, the model runs on my own PC after a one-time download
+All four tools are **off by default**. If I turn one on, the model runs on my own PC after a one-time download
 (GPU when supported, CPU as a fallback). The usual non-AI method runs if the model is missing or can't run.
 
 - **AI background extraction** (GraXpert) estimates uneven sky glow in a linear stack.
@@ -84,6 +92,10 @@ All three tools are **off by default**. If I turn one on, the model runs on my o
 - **AI star separation** (Seti Astro's Cosmic Clarity Dark Star) separates stars in a linear stack so the galaxy or nebula
   can be processed separately. The stars are normally added back. If I set **Star brightness** to **0%**, the stars
   the model separated are left out of the enhanced view. Any it missed may still show; the linear data keep their stars.
+  **Star size** below 100% shrinks each separated star's glow toward its core in the enhanced view, and **Starless** and
+  **Stars only** layers can be downloaded separately.
+- **AI sharpening** (Seti Astro's Cosmic Clarity Sharpen) tightens stars and fine structure blurred by seeing and focus.
+  It doesn't enlarge the image or invent resolution, and it leaves the background noise alone.
 
 None draws new stars, fills in missing sky, or works from someone else's image. Strong cleanup can soften faint
 features or dim a faint halo, so I check the before and after. The report names any model actually used.
@@ -95,7 +107,8 @@ I can compare the original and the result side by side or switch between saved r
 omits location and observer fields; there's a separate full-metadata option if I want those included.
 
 For a sharing copy, **Edit export…** lets me rotate, zoom and frame the enhanced image, and put my name or
-the target name on a separate PNG or JPEG.
+the target name on a separate PNG or JPEG. When the image's position on the sky is known, it can also label the
+galaxies, nebulae and clusters in the frame (OpenNGC catalog) and add a compass and a scale bar.
 
 The result comes with a summary and a downloadable report that records the app version, settings, steps that ran
 or were skipped, and why. That's the best place to check what actually happened before I describe the processing.
@@ -109,12 +122,12 @@ enhancement report rather than assuming every feature ran.
 
 - Target: M__
 - Telescope and filter: ___ (e.g. Seestar S30, IR-cut or LP)
-- Input: telescope JPEG / linear TIFF or FITS stack / individual exposures / stacks from several nights
+- Input: telescope JPEG / linear TIFF or FITS stack / individual exposures / stacks from several nights / mosaic / video
 - Stacked in: telescope / EasyAstroEnhance / other / not applicable
 - Exposure: ___ of ___ frames used (or ___ nights combined), ___ minutes of total exposure used
 - Stacking options, if used: calibration frames ___; native size or 2× drizzle ___
 - Enhanced in: EasyAstroEnhance v___, preset "___"; tweaks ___
-- Optional tools actually used: Hubble-style / manual stretch / channel mixing / AI model(s) ___
+- Optional tools actually used: Hubble-style / manual stretch / channel mixing / accurate star colours / AI model(s) ___
 - Other edits or notes: ___ (e.g. cropped in another app)
 
 ---
@@ -123,6 +136,9 @@ enhancement report rather than assuming every feature ran.
 
 - GraXpert background and denoise models: [GraXpert Development Team and contributors](https://graxpert.com/),
   CC BY-NC-SA 4.0 (non-commercial use).
-- Cosmic Clarity Dark Star star separation model: Seti Astro (Franklin Marek), MIT licence.
+- Cosmic Clarity Dark Star star separation and Cosmic Clarity Sharpen models: Seti Astro (Franklin Marek), MIT licence.
+- Accurate star colours and sky position: ESA Gaia DR3 star catalog. "This work has made use of data from the European
+  Space Agency (ESA) mission Gaia, processed by the Gaia Data Processing and Analysis Consortium (DPAC)." CC BY-SA 3.0 IGO.
+- Object labels: OpenNGC by Mattia Verga and contributors, CC BY-SA 4.0.
 
 For more on supported inputs and processing methods, see the [README](./README.md).

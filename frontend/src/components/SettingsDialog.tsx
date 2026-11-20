@@ -3,6 +3,7 @@ import { api } from '../api/client';
 import type { AppSettings, ComputeInfo, DevicePreference, HistorySummary } from '../api/types';
 import type { AIModels } from '../hooks/useAIModels';
 import type { AppVersion } from '../hooks/useAppVersion';
+import type { ReferenceData } from '../hooks/useReferenceData';
 import { useToasts } from '../hooks/useToasts';
 import { formatBytes } from '../lib/format';
 import { Modal } from './Modal';
@@ -14,6 +15,7 @@ interface SettingsDialogProps {
   busyJobs: boolean;
   version: AppVersion | null;
   aiModels: AIModels;
+  referenceData: ReferenceData;
 }
 
 function AIModelsSection({ models }: { models: AIModels }) {
@@ -40,6 +42,59 @@ function AIModelsSection({ models }: { models: AIModels }) {
                   </td>
                 </tr>
               ))}
+            </tbody>
+          </table>
+        </>
+      )}
+    </section>
+  );
+}
+
+const GROUP_TEXT: Record<'stars' | 'objects', { title: string; purpose: string }> = {
+  stars: { title: 'Star catalog (Gaia DR3)', purpose: 'Finds where an image points on the sky and enables Accurate star colours.' },
+  objects: { title: 'Deep-sky object catalog (OpenNGC)', purpose: 'Labels galaxies, nebulae and clusters on a sharing copy.' },
+};
+
+function ReferenceDataSection({ data }: { data: ReferenceData }) {
+  const o = data.overview;
+  return (
+    <section className="settings-section" data-testid="reference-data-section">
+      <h3>Reference data</h3>
+      {!o ? <p className="muted small">Loading…</p> : (
+        <>
+          <p className="muted small">{o.note} Folder: {o.dir}</p>
+          <table className="ai-models">
+            <tbody>
+              {(['stars', 'objects'] as const).map((g) => {
+                const grp = o.groups[g];
+                const items = o.items.filter((i) => grp.items.includes(i.id));
+                const size = items.reduce((s, i) => s + i.size, 0);
+                const got = items.reduce((s, i) => s + (i.state === 'installed' ? i.size : i.received), 0);
+                const err = items.find((i) => i.state === 'error');
+                return (
+                  <tr key={g} data-testid={`reference-${g}`}>
+                    <td>
+                      <strong>{GROUP_TEXT[g].title}</strong><br />
+                      <span className="small">{GROUP_TEXT[g].purpose}</span><br />
+                      <span className="muted small">
+                        {[...new Map(items.map((i) => [i.attribution, i])).values()].map((i) => (
+                          <span key={i.id}>{i.attribution} · <a href={i.license_url} target="_blank" rel="noreferrer">{i.license}</a> </span>
+                        ))}
+                      </span>
+                    </td>
+                    <td className="small">{size ? formatBytes(size) : '—'}</td>
+                    <td className="small">
+                      {!grp.available && <span className="muted">Not published for this version yet</span>}
+                      {grp.available && grp.state === 'installed' && <>Installed <button type="button" className="btn tiny" onClick={() => void data.remove(g)}>Remove</button></>}
+                      {grp.available && grp.state === 'downloading' && <>{Math.round((100 * got) / Math.max(size, 1))}% <button type="button" className="btn tiny" onClick={() => void data.cancel(g)}>Cancel</button></>}
+                      {grp.available && (grp.state === 'missing' || grp.state === 'error') && (
+                        <>{err && <span className="err-text">{err.error} </span>}
+                          <button type="button" className="btn tiny" data-testid={`reference-download-${g}`} onClick={() => void data.download(g)}>Download</button></>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </>
@@ -176,7 +231,7 @@ function StorageSection({ keep, onKeep }: { keep: number; onKeep: (n: number) =>
   );
 }
 
-export function SettingsDialog({ onClose, onCompute, onHistoryCleared, busyJobs, version, aiModels }: SettingsDialogProps) {
+export function SettingsDialog({ onClose, onCompute, onHistoryCleared, busyJobs, version, aiModels, referenceData }: SettingsDialogProps) {
   const toasts = useToasts();
   const { error: notifyError } = toasts;
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -278,6 +333,8 @@ export function SettingsDialog({ onClose, onCompute, onHistoryCleared, busyJobs,
           </section>
 
           <AIModelsSection models={aiModels} />
+
+          <ReferenceDataSection data={referenceData} />
 
           <StorageSection
             keep={settings.keep_runs_per_image}

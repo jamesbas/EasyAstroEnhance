@@ -145,6 +145,7 @@ def write_fits(
     preset: str,
     strip_sensitive: bool = True,
     extra_history: list[str] | None = None,
+    solved_wcs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write float FITS (stale integer scaling/BLANK removed; checksums added by Astropy).
 
@@ -171,7 +172,7 @@ def write_fits(
     hdu = fits.PrimaryHDU(data=np.ascontiguousarray(arr), header=header)
     h = hdu.header
     h["EAEVER"] = (PIPELINE_VERSION, "EasyAstroEnhance pipeline version")
-    h["EAEKIND"] = (kind, "processed-linear or display-processed")
+    h["EAEKIND"] = (kind, "EasyAstroEnhance export kind")
     h["EAESHA"] = image.source_hash
     h["EAEPRE"] = (preset[:60], "preset/recipe name")
     if bunit:
@@ -181,14 +182,29 @@ def write_fits(
         h.add_history("Contains only linear operations: background/gradient correction, per-channel sky offsets,")
         h.add_history("bounded white-balance gains, optional deconvolution and denoising. No stretch, tone,")
         h.add_history("contrast, saturation or star stretch. Exact values are in processing.json.")
+    elif kind == "starless-linear":
+        h.add_history("The processed-linear data with stars removed by learned (AI) star separation.")
+        h.add_history("Large or saturated stars may remain partly. Stars-linear = processed - starless.")
     else:
         h.add_history("Display-processed values (tone/contrast/color applied); not linear data.")
     if strip_sensitive:
         h.add_history("Location/observer keywords were removed from this export.")
     for line in extra_history or []:
         h.add_history(line[:70])
+    if solved_wcs:
+        # a hinted solve replaces any (unverified) WCS in the source header; a verified header WCS is passed through as is
+        for key in [k for k in h.keys() if k.split("_")[0] in WCS_KEY_PREFIXES or k[:5] in ("CTYPE", "CRVAL", "CRPIX", "CUNIT", "CDELT", "CROTA")
+                    or k[:2] in ("CD", "PC") and len(k) <= 6]:
+            del h[key]
+        for k, v in solved_wcs.items():
+            h[k] = v
+        h["EAEWCS"] = ("solved", "WCS from the EasyAstroEnhance hinted solve")
+        h.add_history("WCS solved by EasyAstroEnhance from catalog stars (Gaia DR3); see processing.json.")
     hdu.writeto(path, overwrite=True, checksum=True)
     return {"bitpix": int(hdu.header["BITPIX"]), "shape": list(arr.shape), "kind": kind}
+
+
+WCS_KEY_PREFIXES = ("A", "B", "AP", "BP")
 
 
 def header_text(header: fits.Header) -> str:

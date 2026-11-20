@@ -3,6 +3,27 @@
 Historical performance baselines: engine **1.2.0**, recipe schema **4** · measured on the target PC (Windows 11, Intel Core Ultra 9 285K,
 64 GB RAM, NVIDIA GeForce RTX 5070 Ti 16 GB, driver 610.62 / CUDA 13.3, Python 3.12.10).
 
+## Engine 1.7 — higher-end capabilities (spec amendments 1.7 and 1.9)
+
+| Item | Result |
+|---|---|
+| Star catalog | Gaia DR3, G < 13.5: 11 193 267 stars, 134.7 MB (SHA-256 `81f828a1…`); no empty 1° cell anywhere on the sky (minimum 33 stars), 75 stars within 0.6° even at the north galactic pole. Built by `backend/tools/build_star_catalog.py`. |
+| Sky solution | Real Seestar stacks M 31, M 42, M 45, C 22: header WCS verified (182–192 matches, 0.73–1.34 px); with the WCS removed, solved from header hints in 1.9–2.5 s at 0.42–0.55 px RMS, within 1–11″ of the header solution. |
+| Accurate star colours | M 31, M 45 and a 4-frame C 22 (S30 IRCUT): gains R 0.76–0.81, B 1.15–1.17 — consistent across targets — and within 0.03 of field-star white balance on M 31; M 42 LP correctly refused (dual-band). |
+| AI sharpening | Cosmic Clarity Sharpen on M 31 via DirectML ≈ 12 s, sky noise unchanged (SNR gate). |
+| Star size | M 31: median separated-star FWHM 5.9 px → 4.1 px (70 %) → 2.8 px (50 %); centroids and peaks kept (unit tests). |
+| Banding, spline gradient | Banding skipped on all five real stacks (no banding above noise); synthetic read-out banding removed. The spline model is not chosen automatically on M 31, M 42 or M 45 (it would follow nebulosity). |
+| Large-scale structure (Vivid) | Reviewed on M 31 and M 42: slightly less core glare and crisper dust lanes; the first version darkened M 31's outer disk, so only a quarter of the band's negative lobe is applied. |
+| Moon & planets | A 1495-frame lunar RAW video stacked (374 frames, 26 s) and Auto chose Moon & planets: black sky, neutral disc, no clipping. Jupiter (1581 frames, 264 × 480 ROI) stacks in 5 s; the recording itself is over-exposed (42 % of the disc at full scale), which the stack report now flags. |
+| Mosaics | NGC 7000 (6 subs, 2 panels) → 1337 × 2150 in 5 s; IC 1805 (84 subs, 41 panels of ~2 frames) → 52 frames used, 2713 × 3113 in 50 s, no visible seams; cloudy late frames rejected against nearby pointings and the session. |
+| GPU memory | The three AI tools' DirectML sessions held 5.1 GB of GPU memory indefinitely; the worker now releases them after 60 s idle (measured: 5.5 GB → 0.37 GB, the runtime's own context). Reload costs ≈ 3 s on a 40 s AI run. |
+| Fixes from testing | Star color with AI star separation failed on the GPU only (CuPy `clip` on a scalar mask) — fixed, GPU parity test added; a failed live preview's error object blanked the page — fixed, plus an app-level error boundary; Edit export's preview overlapped its controls in short windows — fixed (browser test); every run with Accurate star colours applied failed while writing the FITS history (it expected a CSV hash) — fixed, and the full app path (import, solve, all AI tools, every export, annotations, live preview) verified on the real M 101 stack. |
+| Import from Seestar | Real MyWorks folder (55 targets) listed in 0.04 s from names only; browser test adds a stack and opens a pre-filled sub-frame stack. |
+| Tests | Backend 311 (new: `tests/unit/test_engine17.py`, reference-data API, layer and AI-sharpening tests in `test_ai.py`); Playwright 32 (new `phase3.spec.ts`). |
+
+Not verified: blind or JPEG-only sky solving on real data (typed name path is unit-level only), annotations drawn on real
+solved images in the browser (rendering verified in Python), Sun videos (the Solar folder is empty), SER videos.
+
 ## Engine 1.6 — one-button polish and output fixes (spec amendment 1.8)
 
 | Item | Result |
@@ -102,14 +123,14 @@ Not yet verified on real data: darks/flats from a real camera (the Seestar does 
 Aesthetic acceptance is the user's judgement; tune strength tables after feedback (changing outputs requires a
 `PIPELINE_VERSION` bump).
 
-## Performance (tools/benchmark.py → docs/benchmarks.md, synthetic data, engine 1.6.0, Vivid preset)
+## Performance (tools/benchmark.py → docs/benchmarks.md, synthetic data, engine 1.7.0, Vivid preset)
 
 | Image | CPU total | GPU total | GPU pixel group | Note |
 |---|---|---|---|---|
-| 2.1 MP rendered (Seestar-sized) | 3.8 s | 3.3 s | 0.28 s | was 8.7 s / 5.9 s before the phase 1 work |
-| 8.3 MP rendered | 8.2 s | 5.8 s | 0.46 s | was 21.2 s / 10.1 s |
-| 8.3 MP linear RGB | 12.6 s | 10.0 s | 0.59 s | engine 1.5: 11.1 s / 8.6 s (+cosmetic repair and fringe check); a display-only change on the real M31 stack: 4.0 s / 1.8 s |
-| 21 MP linear RGB | 29.1 s | 19.6 s | 1.3 s | engine 1.5: 25.7 s / 16.1 s; peak RAM ≈ 6.4 GB |
+| 2.1 MP rendered (Seestar-sized) | 3.8 s | 3.3 s | 0.24 s | was 8.7 s / 5.9 s before the phase 1 work |
+| 8.3 MP rendered | 8.5 s | 6.1 s | 0.48 s | was 21.2 s / 10.1 s |
+| 8.3 MP linear RGB | 13.8 s | 11.2 s | 0.61 s | engine 1.6: 12.6 s / 10.0 s (+banding check, large-scale band); a display-only change on the real M31 stack: 4.0 s / 1.8 s |
+| 21 MP linear RGB | 32.0 s | 22.2 s | 1.3 s | engine 1.6: 29.1 s / 19.6 s; peak RAM ≈ 6.4 GB |
 
 CPU pixel groups use up to 8 threads on overlapping tiles (`EASYASTRO_CPU_THREADS` caps it); the results are
 bit-for-bit identical to a single full-frame pass, and the speed-ups changed no output pixel or measured parameter
@@ -129,11 +150,17 @@ context, kernel compile) happens once in the worker on the first GPU run or prob
   stored (verified against the telescope's JPG). Assets prepared by engine 1.0 are re-prepared once at start-up; their
   label rectangles and sky samples are cleared if the display orientation changed.
 * Default white balance assumes the typical isolated field star is white. It is not photometric calibration.
-  Optional offline catalog color uses relative RGB ratios, requires an existing celestial FITS solution and does not
-  ship a reference catalog.
+  Accurate star colours (built-in Gaia catalog) and imported catalogs fit relative RGB gains through a generic passband
+  model — not camera-specific spectrophotometry. Sky solving needs pointing hints (FITS header, a typed name or
+  coordinates); blind solving is not implemented.
 * Field-rotation borders are excluded from statistics but stay visible (never cropped automatically); Edit export's
   **Crop stacking edges** frames them out on request.
-* Deconvolution is experimental (opt-in, Gaussian PSF, SNR-gated); validate on your own data before relying on it.
+* Deconvolution (opt-in) uses one Moffat PSF for the whole frame; the 3 × 3 zone FWHM is reported but not used to vary
+  the PSF across the field. AI sharpening, when enabled, replaces it.
+* Video stacking aligns whole frames (no multi-point alignment), so a planet that warps in poor seeing is averaged as
+  recorded; over-exposed recordings are flagged, not repaired. MP4 and SER files are not read. Mosaic panels are
+  levelled by background offsets only (no seam blending); banding repair handles rows and columns, not diagonal
+  patterns.
 * ICC profiles on 16-bit TIFF are not applied (no precision-preserving conversion path); disclosed in the report.
 * Previews/ROI tiles are rendered in a request thread pool (bounded, memory-mapped); all decoding/enhancement runs in the worker.
 * Stacking: debayering is bilinear and resampling is bilinear (slight softening at 100 %; 2× drizzle is the sharper
@@ -142,9 +169,7 @@ context, kernel compile) happens once in the worker on the first GPU run or prob
   runs because both share the single worker.
 * AI tools: GraXpert models are CC BY-NC-SA 4.0 (non-commercial use). AI background extraction can darken the faintest
   outer halo of a frame-filling galaxy; AI star separation leaves very large saturated stars partly in the starless
-  layer (they are added back unchanged). AI tools other than the three listed stay out of scope.
+  layer (they are added back unchanged). AI tools other than the four listed stay out of scope.
 * Deferred by design: cubes, blind plate solving, absolute flux calibration, super-resolution, learned processing
-  beyond the approved tools, installers, remote access. Approved in spec amendment 1.7 but **not yet implemented**
-  (new features; the three existing AI tools above are implemented): header-WCS verification and hinted plate solving,
-  built-in catalog colour, object annotations, a new AI sharpening tool, Star size and Starless/Stars layer exports.
+  beyond the approved tools, installers, remote access.
 * Swagger UI is disabled (it loads assets from a CDN); the OpenAPI schema is at `/api/v1/openapi.json`.

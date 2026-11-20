@@ -92,12 +92,13 @@ class Match:
     reason: str | None = None
 
 
-def match(ref: StarList, cur: StarList, scale_range: tuple[float, float] = (0.9, 1.1)) -> Match:
+def match(ref: StarList, cur: StarList, scale_range: tuple[float, float] = (0.9, 1.1), n_top: int = N_TRIANGLE_STARS,
+          n_top_ref: int | None = None) -> Match:
     if len(ref.x) < 6 or len(cur.x) < 6:
         return Match(False, reason="too few stars to align")
     rp = np.column_stack([ref.x, ref.y])
     cp = np.column_stack([cur.x, cur.y])
-    r_top, c_top = ref.top(N_TRIANGLE_STARS), cur.top(N_TRIANGLE_STARS)
+    r_top, c_top = ref.top(n_top_ref or n_top), cur.top(n_top)
     r_inv, r_tri = _triangles(np.column_stack([r_top.x, r_top.y]))
     c_inv, c_tri = _triangles(np.column_stack([c_top.x, c_top.y]))
     if len(r_inv) == 0 or len(c_inv) == 0:

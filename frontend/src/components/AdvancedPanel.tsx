@@ -5,6 +5,7 @@ import { useToasts } from '../hooks/useToasts';
 import { ADVANCED_BOUNDS, AUTO_STAGES } from '../lib/recipe';
 import type { NumericBound } from '../lib/recipe';
 import { Histogram } from './Histogram';
+import { SkySolutionPanel } from './SkySolutionPanel';
 
 const INTEGER_KEYS = new Set<NumericBound['key']>(['gradient_degree', 'denoise_scales', 'deconvolution_iterations']);
 
@@ -22,6 +23,7 @@ interface AdvancedPanelProps {
   star: StarMaskState;
   onChangeState: () => void;
   onAssetUpdated: (a: Asset) => void;
+  starsReady: boolean;
 }
 
 type Row = { x: string; y: string; w: string; h: string };
@@ -97,7 +99,7 @@ function stateText(asset: Asset): string {
   return 'Not confirmed';
 }
 
-export function AdvancedPanel({ asset, recipe, edit, star, onChangeState, onAssetUpdated }: AdvancedPanelProps) {
+export function AdvancedPanel({ asset, recipe, edit, star, onChangeState, onAssetUpdated, starsReady }: AdvancedPanelProps) {
   const setAdv = (key: NumericBound['key'], raw: string, min: number, max: number) => {
     const n = raw.trim() === '' ? null : Number(raw);
     edit((r) => {
@@ -130,8 +132,29 @@ export function AdvancedPanel({ asset, recipe, edit, star, onChangeState, onAsse
           ))}
           <label className="check small">
             <input type="checkbox" checked={recipe.advanced.deconvolution} onChange={(e) => edit((r) => { r.advanced.deconvolution = e.target.checked; })} data-testid="auto-deconvolution" />
-            Sharpen by deconvolution (experimental, linear stacks; off by default) <span className="muted">— a sharper look is not added resolution</span>
+            Sharpen by deconvolution (linear stacks; off by default) <span className="muted">— measures the star blur (Moffat profile) and reverses part of it; a sharper look is not added resolution</span>
           </label>
+          <label className="check small">
+            <input type="checkbox" checked={recipe.advanced.surface_mode} onChange={(e) => edit((r) => { r.advanced.surface_mode = e.target.checked; })} data-testid="adv-surface-mode" />
+            Moon, Sun or planet <span className="muted">— black sky, the bright surface kept in range, Moon colour balanced on its disc, no star softening (the Moon &amp; planets preset turns this on)</span>
+          </label>
+          <label className="field small">
+            <span>Gradient model</span>
+            <select value={recipe.advanced.gradient_model ?? 'auto'} data-testid="adv-gradient-model"
+              onChange={(e) => { const v = e.target.value; edit((r) => { r.advanced.gradient_model = v === 'auto' ? null : (v as 'polynomial' | 'spline'); }); }}>
+              <option value="auto">Automatic (recommended)</option>
+              <option value="polynomial">Smooth polynomial</option>
+              <option value="spline">Flexible surface (complex light pollution)</option>
+            </select>
+          </label>
+          {recipe.ai.sharpen && (
+            <label className="field small">
+              <span>AI star sharpening: {Math.round(recipe.ai.sharpen_stars * 100)}%</span>
+              <input type="range" min={0} max={1} step={0.05} value={recipe.ai.sharpen_stars} data-testid="adv-sharpen-stars"
+                onChange={(e) => { const v = Number(e.target.value); edit((r) => { r.ai.sharpen_stars = v; }); }} />
+              <small className="muted">0% leaves stars to the non-stellar model only.</small>
+            </label>
+          )}
         </div>
 
         {asset && (
@@ -158,6 +181,14 @@ export function AdvancedPanel({ asset, recipe, edit, star, onChangeState, onAsse
         )}
 
         {asset && asset.status === 'ready' && <ProtectedRects asset={asset} onAssetUpdated={onAssetUpdated} />}
+
+        {asset && asset.status === 'ready' && (
+          <div className="adv-block" data-testid="adv-sky-position">
+            <h4>Sky position</h4>
+            <p className="muted small">Where the image points on the sky, measured from its stars. Used by Accurate star colours and by labels, compass and scale bar in Edit export.</p>
+            <SkySolutionPanel asset={asset} starsReady={starsReady} onAssetUpdated={onAssetUpdated} />
+          </div>
+        )}
 
         <div className="adv-block">
           <h4>Exact values</h4>

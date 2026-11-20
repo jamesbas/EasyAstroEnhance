@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from ..imagedata import ProcessingError
 from .calibrate import build_calibration
-from .frames import FrameInfo, choose_lights, scan_folder, summarize
+from .frames import FrameInfo, choose_lights, detect_mosaic, scan_folder, summarize
 from .integrate import StackOptions, stack_sessions, stack_subs, write_stack_fits
 
 STACK_VERSION = "1.0.0"
@@ -25,6 +25,7 @@ class StackRequest:
     scale: int = 1
     grading: str = "standard"
     rejection: str = "sigma"
+    mosaic: bool | None = None  # None = detect from the frames (sub-frames only)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -47,6 +48,16 @@ def _collect(req: StackRequest) -> tuple[dict[str, list[FrameInfo]], list[dict[s
 
 
 def plan(req: StackRequest) -> dict[str, Any]:
+    from .video import is_video, open_avi
+
+    if is_video(req.folder):
+        v = open_avi(req.folder)
+        n = len(v.offsets)
+        return {"mode": "video", "lights": {"count": n, "width": v.width, "height": v.height, "instrument": v.sidecar.get("INSTRUMENT"),
+                                            "object": v.sidecar.get("OBJECT"), "bayer": v.bayer},
+                "excluded": [], "skipped": [], "calibration": None, "sources": {"light": req.folder},
+                "warnings": [] if v.bayer else ["No Bayer pattern found next to the video; it is stacked as monochrome."],
+                "can_stack": n >= 2, "drizzle_available": False, "output": {"native": [v.width, v.height], "drizzle2x": None}}
     groups, skipped, sources = _collect(req)
     mode, chosen = choose_lights(groups["light"], req.mode)
     lights = chosen.frames
@@ -64,12 +75,30 @@ def plan(req: StackRequest) -> dict[str, Any]:
         out["output"] = {"native": [w, h], "drizzle2x": [2 * w, 2 * h] if mode == "subs" else None}
         if mode == "subs" and len(lights) > 1 and len({f.exposure for f in lights}) > 1:
             out["warnings"].append("Sub-frames have different exposure times; they are normalized and weighted by noise.")
+        if mode == "subs":
+            detected, why = detect_mosaic(lights)
+            use = detected if req.mosaic is None else req.mosaic
+            out["mosaic"] = {"detected": detected, "reason": why or None, "enabled": use}
+            if use:
+                out["output"]["native"] = out["output"]["drizzle2x"] = None  # the mosaic canvas size is known after alignment
+                out["output"]["note"] = "Mosaic: the output covers every panel, so it is larger than one frame."
     out["warnings"] = [w for w in out["warnings"] if w]
     return out
 
 
 def run_stack(req: StackRequest, out_path: Path, check: Callable[[], None], progress: Callable[[str, float], None],
               device: str = "auto", threads: int = 4, memory_budget_bytes: int = 3 * 1024**3) -> dict[str, Any]:
+    from .video import is_video, open_avi, stack_video, write_video_fits
+
+    if is_video(req.folder):
+        v = open_avi(req.folder)
+        data, _cov, rep = stack_video(v, check=check, progress=progress)
+        rep.update({"stack_version": STACK_VERSION, "request": req.to_dict(), "sources": {"light": req.folder}, "excluded": [],
+                    "skipped": [], "lights": {"count": len(v.offsets)},
+                    "output": {"width": int(data.shape[1]), "height": int(data.shape[0])}})
+        progress("Writing stacked image", 0.99)
+        write_video_fits(out_path, v, data, rep)
+        return rep
     groups, skipped, sources = _collect(req)
     mode, chosen = choose_lights(groups["light"], req.mode)
     lights = chosen.frames
@@ -77,8 +106,9 @@ def run_stack(req: StackRequest, out_path: Path, check: Callable[[], None], prog
         raise ProcessingError("TOO_FEW_FRAMES", "At least two light frames are needed to stack.")
     if req.scale not in (1, 2):
         raise ProcessingError("BAD_SCALE", "Output size must be native (1x) or 2x drizzle.")
+    mosaic = mode == "subs" and (detect_mosaic(lights)[0] if req.mosaic is None else req.mosaic)
     opts = StackOptions(mode=mode, scale=req.scale if mode == "subs" else 1, grading=req.grading, rejection=req.rejection,
-                        device=device, threads=threads, memory_budget_bytes=memory_budget_bytes)
+                        device=device, threads=threads, memory_budget_bytes=memory_budget_bytes, mosaic=mosaic)
     if mode == "subs":
         progress("Preparing calibration", 0.0)
         cal = build_calibration(lights, groups["dark"], groups["flat"], groups["bias"], groups["darkflat"], check,

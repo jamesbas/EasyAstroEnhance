@@ -55,6 +55,12 @@ export interface AdvancedRecipe {
   background_strength: number | null;
   deconvolution: boolean;
   deconvolution_iterations: number | null;
+  /** null: polynomial, or a smooth spline surface when the polynomial leaves a large residual */
+  gradient_model: 'polynomial' | 'spline' | null;
+  /** Moon & planets: small-scale wavelet sharpening */
+  fine_sharpen: number | null;
+  /** Moon, Sun, planets: display anchored at the surface, Moon colour balanced on its disc, no star stretch */
+  surface_mode: boolean;
 }
 
 // Optional learned (AI) tools, all off by default. Mirrors AIRecipe.
@@ -63,8 +69,13 @@ export interface AIRecipe {
   denoise: boolean;
   stars: boolean;
   star_brightness: number;
+  /** display size of the separated stars (0.5..1, 1 = unchanged) */
+  star_size: number;
+  sharpen: boolean;
+  sharpen_amount: number;
+  sharpen_stars: number;
 }
-export type AITool = Exclude<keyof AIRecipe, 'star_brightness'>;
+export type AITool = 'background' | 'denoise' | 'stars' | 'sharpen';
 
 export interface ObjectColorRecipe {
   reds: number;
@@ -80,6 +91,31 @@ export interface EditExportBody {
   target: string;
   label: string;
   format: 'png' | 'jpeg';
+  annotations?: AnnotationsBody | null;
+}
+
+export interface AnnotationsBody {
+  objects: boolean;
+  /** catalogue names left out of the labels */
+  hidden: string[];
+  max_mag: number | null;
+  compass: boolean;
+  scale_bar: boolean;
+}
+
+export interface FramedObject {
+  name: string;
+  type: string;
+  common: string | null;
+  mag: number | null;
+  major_arcmin: number | null;
+}
+
+export interface FramedObjects {
+  available: boolean;
+  compass_available: boolean;
+  reason: string | null;
+  objects: FramedObject[];
 }
 
 export interface FocusStretchRecipe {
@@ -114,6 +150,8 @@ export interface Recipe {
   object_color: ObjectColorRecipe;
   focus_stretch: FocusStretchRecipe;
   catalog_sha256: string | null;
+  /** Accurate star colours: the built-in Gaia catalog through the image's sky solution */
+  catalog_builtin: boolean;
   hubble_strength: number;
 }
 
@@ -251,7 +289,34 @@ export interface Asset {
   latest_run: Run | null;
   run_count: number;
   stack: AssetStackInfo | null;
+  sky_solution: SkySolutionSummary | null;
   created_at: string;
+}
+
+export interface SkySolutionSummary {
+  /** verified: the file's own WCS matched catalog stars; solved: worked out from hints; unavailable: not found */
+  status: 'verified' | 'solved' | 'unavailable' | 'none';
+  source: string | null;
+  reason: string | null;
+  center: string | null;
+  center_ra: number | null;
+  center_dec: number | null;
+  scale_arcsec: number | null;
+  north_angle_deg: number | null;
+  field_deg: [number, number] | null;
+  mirrored: boolean | null;
+  matches: number | null;
+  rms_px: number | null;
+  seconds: number | null;
+  header_note: string | null;
+}
+
+export interface SkySolveBody {
+  /** object name ("M 31", "NGC 7000") */
+  name?: string | null;
+  ra?: number | null;
+  dec?: number | null;
+  field_width_deg?: number | null;
 }
 
 export interface AssetList {
@@ -264,7 +329,8 @@ export interface UploadResult {
 
 // ---- runs / jobs
 export type RunState = 'queued' | 'running' | 'succeeded' | 'succeeded_with_notes' | 'failed' | 'cancelled' | 'interrupted';
-export type ExportKind = 'png' | 'tiff' | 'jpeg' | 'comparison' | 'fits' | 'linear-tiff' | 'report' | 'summary';
+export type ExportKind = 'png' | 'tiff' | 'jpeg' | 'comparison' | 'fits' | 'linear-tiff' | 'report' | 'summary'
+  | 'starless-png' | 'stars-png' | 'starless-fits' | 'stars-fits';
 
 export interface ExportEntry {
   kind: ExportKind;
@@ -330,7 +396,7 @@ export interface LivePreview {
   id?: string;
   state: LiveState;
   stage?: string | null;
-  error?: string | null;
+  error?: ApiErrorBody | null;
   recipe?: Recipe;
   summary?: string | null;
   operations?: OperationNote[];
@@ -440,6 +506,7 @@ export interface StackCreateBody extends StackFolders {
   scale: 1 | 2;
   grading: StackGrading;
   rejection: 'sigma' | 'none';
+  mosaic?: boolean | null;
   auto_enhance: boolean;
   recipe: Recipe | null;
   preset_id: string | null;
@@ -466,7 +533,7 @@ export interface NamedReason {
 
 export interface StackPlan {
   name: string;
-  mode: 'subs' | 'sessions';
+  mode: 'subs' | 'sessions' | 'video';
   lights: FrameSummary;
   excluded: NamedReason[];
   skipped: NamedReason[];
@@ -474,11 +541,14 @@ export interface StackPlan {
   warnings: string[];
   can_stack: boolean;
   drizzle_available: boolean;
-  output?: { native: [number, number]; drizzle2x: [number, number] | null };
+  output?: { native: [number, number] | null; drizzle2x: [number, number] | null; note?: string };
+  mosaic?: { detected: boolean; reason: string | null; enabled: boolean };
 }
 
 export interface StackReport {
-  mode: 'subs' | 'sessions';
+  mode: 'subs' | 'sessions' | 'video';
+  saturation?: { bright_pixels_at_full_scale: number; warning: string | null };
+  mosaic?: { canvas: [number, number]; frame: [number, number]; chained_frames: number };
   frames_used: number;
   frames_total: number;
   rejected_frames: NamedReason[];
@@ -513,7 +583,7 @@ export interface StackList {
 export interface AssetStackInfo {
   id: string;
   name: string;
-  mode: 'subs' | 'sessions';
+  mode: 'subs' | 'sessions' | 'video';
   frames_used: number;
   frames_total: number;
   rejected_frames: NamedReason[];
@@ -522,6 +592,8 @@ export interface AssetStackInfo {
   seconds: number;
   calibration: { darks: number; flats: number; bias: number; dark_flats: number };
   defective_pixels: number | null;
+  mosaic_canvas?: [number, number] | null;
+  saturation_warning?: string | null;
 }
 
 export interface JobCreateBody {
@@ -707,4 +779,63 @@ export interface AIOverview {
   provider_label: string | null;
   models_dir: string;
   note: string;
+}
+
+// ---- reference data (star and object catalogs for sky solving, accurate colours and labels)
+export interface ReferenceDataItem {
+  id: string;
+  title: string;
+  file: string;
+  size: number;
+  license: string;
+  license_url: string;
+  attribution: string;
+  state: AIModelState;
+  received: number;
+  error: string | null;
+}
+
+export interface ReferenceDataGroup {
+  items: string[];
+  ready: boolean;
+  state: AIModelState;
+  download_bytes: number;
+  /** false until the pinned file has been published */
+  available: boolean;
+}
+
+export interface ReferenceDataOverview {
+  items: ReferenceDataItem[];
+  groups: Record<'stars' | 'objects', ReferenceDataGroup>;
+  dir: string;
+  note: string;
+}
+
+// ---- Seestar import
+export interface SeestarStack {
+  path: string;
+  name: string;
+  bytes: number;
+  frames?: number;
+  exposure_s?: number;
+  total_exposure_s?: number;
+  filter?: string | null;
+  taken: string;
+}
+
+export interface SeestarTarget {
+  name: string;
+  kind: 'deep-sky' | 'mosaic' | 'moon' | 'sun' | 'planet';
+  folder: string;
+  stacks: number;
+  newest_stack: SeestarStack | null;
+  subs: { path: string; frames: number } | null;
+  videos: { path: string; name: string; bytes: number; taken: string }[];
+}
+
+export interface SeestarScan {
+  path: string | null;
+  targets: SeestarTarget[];
+  candidates: string[];
+  error?: string;
 }

@@ -13,6 +13,9 @@ interface StackDialogProps {
   onClose: () => void;
   onStarted: (stack: Stack) => void;
   newKey: () => string;
+  /** opened from Import from Seestar: the folder (or video) is filled in and scanned */
+  initialFolder?: string | null;
+  initialAutoEnhance?: boolean;
 }
 
 type CalKey = 'darks' | 'flats' | 'bias' | 'darkflats';
@@ -33,7 +36,9 @@ function minutes(s: number | null | undefined): string {
 function PlanSummary({ plan }: { plan: StackPlan }) {
   const l = plan.lights;
   const parts: string[] = [];
-  if (plan.mode === 'subs') {
+  if (plan.mode === 'video') {
+    parts.push(`${l.count} video frames; the sharpest quarter are aligned and averaged (lucky imaging)`);
+  } else if (plan.mode === 'subs') {
     parts.push(`${l.count} sub-frame${l.count === 1 ? '' : 's'}`);
     if (l.exposures?.length) parts.push(`${l.exposures.join(' / ')} s each`);
   } else {
@@ -49,7 +54,7 @@ function PlanSummary({ plan }: { plan: StackPlan }) {
   const calText = cal ? [cal.dark && `${cal.dark} darks`, cal.flat && `${cal.flat} flats`, cal.bias && `${cal.bias} bias`, cal.darkflat && `${cal.darkflat} dark-flats`].filter(Boolean).join(', ') : '';
   return (
     <div className="stack-summary" data-testid="stack-summary">
-      <p><strong>{plan.mode === 'subs' ? 'Stack sub-frames' : 'Combine stacked images (several nights)'}</strong> — {parts.join(' · ')}</p>
+      <p><strong>{plan.mode === 'video' ? 'Stack a video (Moon, Sun or planet)' : plan.mode === 'subs' ? 'Stack sub-frames' : 'Combine stacked images (several nights)'}</strong> — {parts.join(' · ')}</p>
       {plan.mode === 'subs' && <p className="muted small">Calibration: {calText || 'none found — hot pixels are still removed automatically'}</p>}
       {notUsed.length > 0 && (
         <details className="manage">
@@ -65,8 +70,8 @@ function PlanSummary({ plan }: { plan: StackPlan }) {
   );
 }
 
-export function StackDialog({ recipe, settingsLabel, presetId, onClose, onStarted, newKey }: StackDialogProps) {
-  const [folder, setFolder] = useState(() => localStorage.getItem(FOLDER_KEY) ?? '');
+export function StackDialog({ recipe, settingsLabel, presetId, onClose, onStarted, newKey, initialFolder = null, initialAutoEnhance = false }: StackDialogProps) {
+  const [folder, setFolder] = useState(() => initialFolder ?? localStorage.getItem(FOLDER_KEY) ?? '');
   const [cal, setCal] = useState<Record<CalKey, string>>({ darks: '', flats: '', bias: '', darkflats: '' });
   const [plan, setPlan] = useState<StackPlan | null>(null);
   const [scanning, setScanning] = useState(false);
@@ -75,13 +80,19 @@ export function StackDialog({ recipe, settingsLabel, presetId, onClose, onStarte
   const [scale, setScale] = useState<1 | 2>(1);
   const [grading, setGrading] = useState<StackGrading>('standard');
   const [rejection, setRejection] = useState(true);
-  const [autoEnhance, setAutoEnhance] = useState(false);
+  const [autoEnhance, setAutoEnhance] = useState(initialAutoEnhance);
+  const [mosaic, setMosaic] = useState<boolean | null>(null);
   const [browsing, setBrowsing] = useState(false);
 
   // Any change to the folders makes the summary stale.
   useEffect(() => {
     setPlan(null);
+    setMosaic(null);
   }, [folder, cal]);
+
+  useEffect(() => {
+    if (initialFolder) void scan(initialFolder);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const folders = (f: string = folder) => ({
     folder: f.trim(),
@@ -118,6 +129,7 @@ export function StackDialog({ recipe, settingsLabel, presetId, onClose, onStarte
         scale,
         grading,
         rejection: rejection ? 'sigma' : 'none',
+        mosaic: plan.mosaic && mosaic !== null ? mosaic : null,
         auto_enhance: autoEnhance,
         recipe: autoEnhance ? recipe : null,
         preset_id: autoEnhance ? presetId : null,
@@ -130,8 +142,9 @@ export function StackDialog({ recipe, settingsLabel, presetId, onClose, onStarte
     }
   };
 
-  const native = plan?.output?.native;
-  const drizzle = plan?.output?.drizzle2x;
+  const mosaicOn = plan?.mosaic ? (mosaic ?? plan.mosaic.enabled) : false;
+  const native = mosaicOn ? null : plan?.output?.native;
+  const drizzle = mosaicOn ? null : plan?.output?.drizzle2x;
 
   return (
     <Modal title="Stack frames" onClose={onClose} testId="stack-dialog" wide>
@@ -185,15 +198,22 @@ export function StackDialog({ recipe, settingsLabel, presetId, onClose, onStarte
             <legend>Output size</legend>
             <label className="check">
               <input type="radio" name="stack-scale" checked={scale === 1} onChange={() => setScale(1)} data-testid="stack-scale-native" />
-              Native{native ? ` (${native[0]} × ${native[1]})` : ''} — recommended
+              Native{native ? ` (${native[0]} × ${native[1]})` : mosaicOn ? ' (covers every panel; size known after alignment)' : ''} — recommended
             </label>
-            {plan.drizzle_available && drizzle && (
+            {plan.drizzle_available && (drizzle || mosaicOn) && (
               <label className="check">
                 <input type="radio" name="stack-scale" checked={scale === 2} onChange={() => setScale(2)} data-testid="stack-scale-drizzle" />
-                2× drizzle ({drizzle[0]} × {drizzle[1]}) — finer detail with many frames (50+); slower, 4× larger file
+                2× drizzle{drizzle ? ` (${drizzle[0]} × ${drizzle[1]})` : ''} — finer detail with many frames (50+); slower, 4× larger file
               </label>
             )}
           </fieldset>
+
+          {plan.mosaic && (
+            <label className="check" data-testid="stack-mosaic-row">
+              <input type="checkbox" checked={mosaicOn} onChange={(e) => setMosaic(e.target.checked)} data-testid="stack-mosaic" />
+              Mosaic — the result covers every panel{plan.mosaic.detected && plan.mosaic.reason ? ` (found: ${plan.mosaic.reason})` : ''}
+            </label>
+          )}
 
           <details className="manage">
             <summary>Advanced</summary>

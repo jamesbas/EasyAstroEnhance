@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import math
 from dataclasses import dataclass
+from typing import Any, Callable
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -87,12 +88,21 @@ def _draw_caption(display: np.ndarray, lines: list[str]) -> None:
 
 
 def render_edited(display: np.ndarray, frame: Framing, lines: list[str], *, jpeg: bool,
-                  metadata: bytes | None = None, preview: bool = False) -> bytes:
-    image = reframe(display, frame, 1000 if preview else None)
-    if lines:
+                  metadata: bytes | None | Callable[[Any], bytes] = None, preview: bool = False,
+                  overlay: Callable[[np.ndarray, int | None], Any] | None = None) -> bytes:
+    """``overlay(image, max_edge)`` draws annotations on the framed copy; ``metadata`` may be a function of what it drew."""
+    max_edge = 1000 if preview else None
+    image = reframe(display, frame, max_edge)
+    drawn = None
+    if lines or overlay is not None:
         if np.shares_memory(image, display):
             image = image.copy()
+    if overlay is not None:
+        drawn = overlay(image, max_edge)
+    if lines:
         _draw_caption(image, lines)
+    if callable(metadata):
+        metadata = metadata(drawn)
     if not jpeg and not preview:
         return encode_png(image, edit_metadata=metadata)
     pixels = np.empty(image.shape, dtype=np.uint8)

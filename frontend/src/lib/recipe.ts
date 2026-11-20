@@ -59,7 +59,7 @@ export const AUTO_STAGES: AutoStageSpec[] = [
 ];
 
 export interface NumericBound {
-  key: Exclude<keyof AdvancedRecipe, 'deconvolution'>;
+  key: Exclude<keyof AdvancedRecipe, 'deconvolution' | 'gradient_model' | 'surface_mode'>;
   label: string;
   min: number;
   max: number;
@@ -82,6 +82,7 @@ export const ADVANCED_BOUNDS: NumericBound[] = [
   { key: 'tone_gain', label: 'Midtone gain (processed images)', min: 1, max: 2.5, step: 0.01, hint: 'Rational midtone gain for already-processed images' },
   { key: 'background_strength', label: 'Manual background strength', min: 0, max: 1, step: 0.01, hint: 'Replaces the Balance background strength button' },
   { key: 'deconvolution_iterations', label: 'Deconvolution iterations', min: 1, max: 50, step: 1, hint: 'Used only when deconvolution is switched on (default 10)' },
+  { key: 'fine_sharpen', label: 'Fine sharpening', min: 0, max: 1, step: 0.05, hint: 'Small-scale wavelet sharpening above the noise, for the Moon and planets (Moon & planets uses 0.6)' },
 ];
 
 export const PRESET_DESCRIPTIONS: Record<string, string> = {
@@ -92,6 +93,7 @@ export const PRESET_DESCRIPTIONS: Record<string, string> = {
   'bright-core': 'Stronger core compression for high-dynamic-range targets such as M42 or M31.',
   'star-field': 'Gentle stretch that keeps stars small and colorful for clusters and star fields.',
   'seestar-match': 'Close to the Seestar app look, for side-by-side comparison.',
+  'moon-planets': 'For the Moon, Sun and planets: a black sky, the surface kept in range and fine detail sharpened.',
 };
 
 export function cloneRecipe(r: Recipe): Recipe {
@@ -114,7 +116,7 @@ export function normalizeRecipe(r: Recipe): string {
   const { preset: _preset, ...rest } = r;
   if (r.auto_preset) {
     const { look: _look, advanced, ...others } = rest;
-    const { hdr_amount: _h, star_stretch_amount: _s, ...adv } = advanced;
+    const { hdr_amount: _h, star_stretch_amount: _s, fine_sharpen: _f, stretch_log_d: _d, surface_mode: _m, ...adv } = advanced;
     return JSON.stringify(sortKeys({ ...others, advanced: adv }));
   }
   return JSON.stringify(sortKeys(rest));

@@ -16,9 +16,14 @@ from ..db import Database, new_id, now
 from ..processing import export as exp
 
 ALLOWED_KINDS = {"png", "tiff", "jpeg", "comparison", "report", "summary", "fits", "linear-tiff"}
+# On request only (More formats), never in Download all: layers of a run in which AI star separation ran.
+LAYER_KINDS = {"starless-png", "stars-png", "starless-fits", "stars-fits"}
+LAYER_FILES = {"starless-png": "starless.png", "stars-png": "stars-only.png", "starless-fits": "starless-linear.fits",
+               "stars-fits": "stars-linear.fits"}
+DOWNLOADABLE_KINDS = ALLOWED_KINDS | LAYER_KINDS
 DEFAULT_KINDS = ("png", "report", "summary")
 _STORED = {".png", ".jpg", ".tif"}  # already compressed
-_render_lock = threading.Lock()
+_render_lock = threading.RLock()  # re-entrant: the stars layer renders the starless layer first
 _cancelled: set[str] = set()
 
 
@@ -43,12 +48,22 @@ def ensure_export(cfg: Config, db: Database, run: dict[str, Any], entry: dict[st
     with _render_lock:
         if path.exists():
             return path
-        if entry["filename"] != exp.DEFERRED_TIFF:
-            raise FileNotFoundError(entry["filename"])
         report_path = run_dir / "processing.json"
-        engine = json.loads(report_path.read_text(encoding="utf-8"))["applied"]["engine_version"] if report_path.exists() else exp.PIPELINE_VERSION
+        report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.exists() else {}
+        engine = (report.get("applied") or {}).get("engine_version", exp.PIPELINE_VERSION)
         tmp = path.with_name(path.name + ".partial")
-        exp.write_tiff16_u16(tmp, np.load(run_dir / "display.npy", mmap_mode="r"), engine)
+        if entry["filename"] == exp.DEFERRED_TIFF:
+            exp.write_tiff16_u16(tmp, np.load(run_dir / "display.npy", mmap_mode="r"), engine)
+        elif entry["kind"] in ("starless-png", "stars-png"):
+            src = "display_starless.npy" if entry["kind"] == "starless-png" else "display_stars.npy"
+            exp.write_png(tmp, np.load(run_dir / src).astype(np.float32) / 65535.0, 16)
+        elif entry["kind"] == "starless-fits":
+            _write_starless_fits(cfg, db, run, report, tmp)
+        elif entry["kind"] == "stars-fits":
+            starless = ensure_export(cfg, db, run, {"kind": "starless-fits", "filename": LAYER_FILES["starless-fits"], "deferred": True})
+            _write_stars_fits(run_dir / "processed-linear.fits", starless, tmp)
+        else:
+            raise FileNotFoundError(entry["filename"])
         tmp.replace(path)
         fresh = db.one("SELECT exports FROM runs WHERE id=?", (run["id"],))
         exports = [
@@ -57,6 +72,36 @@ def ensure_export(cfg: Config, db: Database, run: dict[str, Any], entry: dict[st
         ]
         db.update("runs", run["id"], {"exports": exports})
     return path
+
+
+def _write_starless_fits(cfg: Config, db: Database, run: dict[str, Any], report: dict[str, Any], out: Path) -> None:
+    """The starless processed-linear array in the source FITS layout (same header handling as the processed FITS)."""
+    from .worker import load_image
+
+    asset = db.one("SELECT * FROM assets WHERE id=?", (run["asset_id"],))
+    if not asset:
+        raise FileNotFoundError("source image")
+    payload = {"id": asset["id"], "filename": asset["filename"], "path": str(cfg.assets_dir / asset["id"] / asset["original_name"]),
+               "sha256": asset["sha256"], "inspection": asset["inspection"], "interpretation": asset["interpretation"] or {}}
+    image = load_image(cfg, payload)
+    data = np.load(cfg.runs_dir / run["id"] / "starless_linear.npy")
+    sol = ((report.get("per_file_resolution") or {}).get("sky_solution") or {})
+    exp.write_fits(out, image, data, "starless-linear", ((report.get("requested_recipe") or {}).get("preset") or "custom"),
+                   bool((report.get("settings") or {}).get("strip_location", True)),
+                   ["Stars removed with learned (AI) star separation; model in processing.json."],
+                   sol.get("header") if sol.get("status") == "solved" else None)
+
+
+def _write_stars_fits(processed: Path, starless: Path, out: Path) -> None:
+    """Stars-linear = processed-linear minus starless-linear (so the two add up to the processed data)."""
+    from astropy.io import fits
+
+    with fits.open(processed, memmap=False) as p, fits.open(starless, memmap=False) as s:
+        data = (p[0].data.astype(np.float32) - s[0].data.astype(np.float32)).astype(np.float32)
+        hdr = s[0].header.copy()
+    hdr["EAEKIND"] = ("stars-linear", "processed-linear minus starless-linear")
+    hdr.add_history("Stars only: processed-linear minus starless-linear (learned star separation).")
+    fits.PrimaryHDU(data=data, header=hdr).writeto(out, overwrite=True, checksum=True)
 
 
 def start_batch(cfg: Config, db: Database, run_ids: list[str], include: list[str]) -> str:

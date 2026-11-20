@@ -142,13 +142,15 @@ STAR_COLOR_GAIN = 1.0  # saturation inside the star mask = 1 + gain * star_color
 
 def star_color(xp, y, star_soft, amount: float):
     """Boost the existing color of stars (inside the soft star mask) about each pixel's luminance, limited per pixel so
-    no channel leaves [0, 1]. Pure-white saturated cores have no color to boost and stay white."""
+    no channel leaves [0, 1]. Pure-white saturated cores have no color to boost and stay white. ``star_soft`` may be a
+    scalar (1.0 for an already separated star layer, where every pixel is star)."""
     if y.ndim == 2 or amount <= 0:
         return y
     ly = luminance(xp, y)
     lc = xp.clip(ly, 0.0, 1.0)
     d = y - ly[..., None]
-    s_eff = 1.0 + STAR_COLOR_GAIN * amount * xp.clip(star_soft, 0.0, 1.0)
+    mask = min(max(float(star_soft), 0.0), 1.0) if np.isscalar(star_soft) else xp.clip(star_soft, 0.0, 1.0)
+    s_eff = 1.0 + STAR_COLOR_GAIN * amount * mask
     fit = _fit_factor(xp, lc, d)
     f = xp.maximum(1.0, xp.minimum(s_eff, 1.0 + 0.95 * (fit - 1.0)))
     return ly[..., None] + f[..., None] * d
@@ -230,6 +232,82 @@ def fringe_reduce(xp, y, ring, amount: float):
     s = FRINGE_MAX_REDUCTION * amount * ring * window * smoothstep(xp, chroma / 0.03)
     ly = luminance(xp, y)[..., None]
     return ly + (1.0 - s[..., None]) * (y - ly)
+
+
+# ------------------------------------------------------------------------------------------------ large-scale structure
+LS_SIGMAS = (32.0, 128.0)  # px: difference of Gaussians, the 64-256 px band (galaxy arms, nebula filaments)
+LS_BIN = 8
+LS_GAIN = 1.0
+LS_CAP = 0.05  # display units
+LS_START = 0.3  # Contrast/Pop slider value above which large-scale structure is added
+LS_GATE_SIGMAS = 5.0
+LS_NEGATIVE = 0.25  # share of the band's negative lobe that is applied
+
+
+def large_scale_amount(contrast: float) -> float:
+    return float(max(0.0, (contrast - LS_START) / (1.0 - LS_START)))
+
+
+def large_scale_band(Y: np.ndarray, valid: np.ndarray, sky: float, sky_sd: float) -> tuple[np.ndarray, dict[str, Any]]:
+    """The 64-256 px structure band of the display luminance, gated to signal above the sky and capped, computed on a
+    1/8-size copy (it varies slowly) and enlarged; added to the luminance times the amount in pixel group B."""
+    from .ai.tiles import resize_linear
+
+    h, w = Y.shape
+    f = LS_BIN
+    hh, ww = h // f * f, w // f * f
+    v = valid[:hh, :ww].reshape(hh // f, f, ww // f, f).astype(np.float32)
+    s = np.where(valid, Y, 0.0)[:hh, :ww].reshape(hh // f, f, ww // f, f).sum(axis=(1, 3))
+    small = s / np.maximum(v.sum(axis=(1, 3)), 1.0)
+    g1 = ndimage.gaussian_filter(small, LS_SIGMAS[0] / f, mode="reflect")
+    g2 = ndimage.gaussian_filter(small, LS_SIGMAS[1] / f, mode="reflect")
+    gate = np.clip((g1 - sky) / max(LS_GATE_SIGMAS * sky_sd, 1e-6), 0.0, 1.0)
+    gate = gate * gate * (3 - 2 * gate)
+    dog = g1 - g2
+    dog = np.where(dog < 0, LS_NEGATIVE * dog, dog)  # brighten structure; barely darken its surroundings (faint arms, outer halo)
+    band = np.clip(LS_GAIN * dog * gate, -LS_CAP, LS_CAP).astype(np.float32)
+    full = resize_linear(band[..., None], h, w)[..., 0]
+    info = {"band_px": [2 * LS_SIGMAS[0], 2 * LS_SIGMAS[1]], "gain": LS_GAIN, "cap": LS_CAP, "gate_sigmas_above_sky": LS_GATE_SIGMAS,
+            "max_abs": float(np.abs(band).max()) if band.size else 0.0,
+            "method": "difference of Gaussians (sigma 32 and 128 px) of the display luminance on a 1/8-size copy, gated to signal "
+                      "above the sky, capped and enlarged"}
+    return np.where(valid, full, 0.0).astype(np.float32), info
+
+
+# ------------------------------------------------------------------------------------------------ fine sharpening
+FS_GAINS = (2.5, 1.8, 1.0, 0.5)  # extra gain of the 1, 2, 4 and 8 px a trous layers at amount 1 (Registax-style)
+FS_NOISE_K = 2.0  # each layer is soft-thresholded at this many times its measured noise before boosting
+FS_CAP = 0.15  # display units
+
+
+@dataclass(frozen=True)
+class FineSharpenParams:
+    amount: float
+    sigmas: tuple[float, ...]
+
+    @property
+    def halo(self) -> int:
+        return wavelets.total_radius(len(FS_GAINS)) + 2
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"method": "a trous wavelet layers (1, 2, 4, 8 px) soft-thresholded at their measured noise and boosted "
+                          "(Registax-style; for the Moon, Sun and planets)",
+                "amount": self.amount, "layer_gains_at_amount_1": list(FS_GAINS), "noise_threshold_sigmas": FS_NOISE_K,
+                "layer_noise_sigma": list(self.sigmas), "cap_display_units": FS_CAP, "tile_halo_px": self.halo}
+
+
+def fine_sharpen(be, L, weight, p: FineSharpenParams):
+    xp = be.xp
+    planes, _ = wavelets.decompose(xp, L, len(FS_GAINS))
+    boost = None
+    for w_j, s, g in zip(planes, p.sigmas, FS_GAINS):
+        t = FS_NOISE_K * s
+        soft = xp.sign(w_j) * xp.maximum(xp.abs(w_j) - t, 0.0)
+        term = g * soft
+        boost = term if boost is None else boost + term
+    boost = xp.clip(p.amount * boost, -FS_CAP, FS_CAP)
+    boost = xp.maximum(boost, -0.5 * xp.maximum(L, 0.0))
+    return L + boost * weight
 
 
 # ------------------------------------------------------------------------------------------------ detail

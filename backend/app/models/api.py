@@ -66,6 +66,7 @@ class StackFolders(BaseModel):
     flats: str | None = Field(default=None, max_length=500)
     bias: str | None = Field(default=None, max_length=500)
     darkflats: str | None = Field(default=None, max_length=500)
+    mosaic: bool | None = None  # None: detected from the frames (Seestar mosaic sub-frames or spread pointings)
 
 
 class StackCreate(StackFolders):
@@ -97,6 +98,15 @@ class BatchExportIn(BaseModel):
     include: list[Literal["tiff", "jpeg", "comparison", "fits", "linear-tiff"]] = Field(default_factory=list)
 
 
+class AnnotationsIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    objects: bool = False
+    hidden: list[str] = Field(default_factory=list, max_length=500)
+    max_mag: float | None = Field(default=None, ge=0, le=20)
+    compass: bool = False
+    scale_bar: bool = False
+
+
 class EditExportIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     rotation: int = Field(default=0, ge=-180, le=180)
@@ -106,6 +116,16 @@ class EditExportIn(BaseModel):
     target: str = Field(default="", max_length=80)
     label: str = Field(default="", max_length=120)
     format: Literal["png", "jpeg"] = "png"
+    annotations: AnnotationsIn = AnnotationsIn()
+
+
+class FramingIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    rotation: int = Field(default=0, ge=-180, le=180)
+    zoom: float = Field(default=1, ge=1, le=4)
+    pan_x: float = Field(default=0, ge=-1, le=1)
+    pan_y: float = Field(default=0, ge=-1, le=1)
+    max_mag: float | None = Field(default=None, ge=0, le=20)
 
 
 class PresetPreviewItem(BaseModel):
@@ -117,6 +137,25 @@ class PresetPreviewItem(BaseModel):
 class PresetPreviewsIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     items: list[PresetPreviewItem] = Field(min_length=1, max_length=16)
+
+
+class SkySolveIn(BaseModel):
+    """Optional hints for files without usable pointing data (all optional; none = use the file's own header)."""
+    model_config = ConfigDict(extra="forbid")
+    ra: float | None = Field(default=None, ge=0, lt=360)
+    dec: float | None = Field(default=None, ge=-90, le=90)
+    field_width_deg: float | None = Field(default=None, gt=0.05, le=20)
+    name: str | None = Field(default=None, min_length=1, max_length=60)
+
+
+class ImportIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    paths: list[str] = Field(min_length=1, max_length=50)
+
+
+class SeestarScanIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str | None = Field(default=None, max_length=500)
 
 
 class FolderBrowseIn(BaseModel):

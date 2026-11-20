@@ -126,17 +126,42 @@ class GradientModel:
     amplitude: list[float] = field(default_factory=list)
     relative_amplitude: float = 0.0
     reason: str | None = None
+    kind: str = "polynomial"  # polynomial | spline
+    spline_points: list[list[float]] = field(default_factory=list)  # kept sky boxes (normalized x, y)
+    spline_values: list[list[float]] = field(default_factory=list)  # per channel, at the kept boxes
+    spline_smoothing: float = 0.0
+    choice: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        method = (f"robust polynomial (degree {self.degree}) fitted to sigma-clipped sky boxes; zero-median model subtracted"
+                  if self.kind == "polynomial" else
+                  "smoothed thin-plate spline through sigma-clipped sky boxes (GraXpert-style classical model); zero-median model subtracted")
         return {
-            "method": f"robust polynomial (degree {self.degree}) fitted to sigma-clipped sky boxes; zero-median model subtracted",
+            "method": method, "kind": self.kind, "choice": self.choice,
             "ok": self.ok, "degree": self.degree, "boxes_used": self.boxes_used, "boxes_total": self.boxes_total,
             "amplitude_per_channel": self.amplitude, "amplitude_relative_to_pixel_noise": self.relative_amplitude,
-            "coefficients": self.coeffs, "reason": self.reason,
+            "coefficients": self.coeffs if self.kind == "polynomial" else None,
+            "spline_smoothing": self.spline_smoothing if self.kind == "spline" else None, "reason": self.reason,
         }
 
 
-def fit_gradient(u: np.ndarray, stat_weight: np.ndarray, star_hard: np.ndarray | None, degree: int, sigma_pix: float) -> GradientModel:
+SPLINE_TRIGGER = 4.0  # polynomial residual at the sky boxes, in units of the scatter expected from noise alone
+SPLINE_MIN_BOXES = 40
+SPLINE_MIN_SKY_FRACTION = 0.8  # automatic only when most of the frame is empty sky (a spline would follow faint nebulosity)
+SPLINE_GRID = 128
+
+
+def _spline_grid(points: np.ndarray, values: np.ndarray, smoothing: float, n: int = SPLINE_GRID) -> np.ndarray:
+    from scipy.interpolate import RBFInterpolator
+
+    rbf = RBFInterpolator(points, values, kernel="thin_plate_spline", smoothing=smoothing)
+    g = np.linspace(-1.0, 1.0, n)
+    gx, gy = np.meshgrid(g, g)
+    return rbf(np.column_stack([gx.ravel(), gy.ravel()])).reshape(n, n)
+
+
+def fit_gradient(u: np.ndarray, stat_weight: np.ndarray, star_hard: np.ndarray | None, degree: int, sigma_pix: float,
+                 kind: str | None = None) -> GradientModel:
     h, w = stat_weight.shape
     s = max(16, int(np.ceil(max(h, w) / GRID_BOXES)))
     use = stat_weight.copy()
@@ -203,6 +228,27 @@ def fit_gradient(u: np.ndarray, stat_weight: np.ndarray, star_hard: np.ndarray |
         amps.append(float(grid.max() - grid.min()))
     model.coeffs, model.offsets, model.amplitude = coeffs, offsets, amps
     model.boxes_used = int(keep.sum())
+    # Polynomial or spline: the spline is chosen when the polynomial leaves a residual the noise cannot explain.
+    coef_l, *_ = np.linalg.lstsq(A_all[keep], lbox_a[keep], rcond=None)
+    resid_poly = float(np.median(np.abs(lbox_a[keep] - A_all[keep] @ coef_l)) * MAD_TO_SIGMA)
+    px_per_box = max(1.0, float(s * s) * 0.5)
+    expected = 1.2533 * med_s / np.sqrt(px_per_box)
+    ratio = resid_poly / max(expected, 1e-12)
+    sky_fraction = float(keep.sum()) / max(total, 1)
+    auto_spline = bool(ratio > SPLINE_TRIGGER and keep.sum() >= SPLINE_MIN_BOXES and sky_fraction >= SPLINE_MIN_SKY_FRACTION)
+    use_spline = kind == "spline" or (kind is None and auto_spline)
+    model.choice = {"requested": kind or "automatic", "polynomial_residual_vs_noise": ratio, "trigger": SPLINE_TRIGGER,
+                    "min_boxes": SPLINE_MIN_BOXES, "sky_fraction": sky_fraction, "min_sky_fraction": SPLINE_MIN_SKY_FRACTION}
+    if use_spline and keep.sum() >= 12:
+        pts = np.column_stack([xn[keep], yn[keep]])
+        sm = float(keep.sum()) * 0.01  # values are scaled to the expected box scatter, so this smooths toward noise level
+        scale = max(expected, 1e-12)
+        grids = [_spline_grid(pts, vals_a[keep, c] / scale, sm) * scale for c in range(vals_a.shape[1])]
+        model.kind, model.spline_points, model.spline_smoothing = "spline", pts.tolist(), sm
+        model.spline_values = [[float(v) / scale for v in vals_a[keep, c]] for c in range(vals_a.shape[1])]
+        model.choice["spline_scale"] = scale
+        model.offsets = [float(np.median(g)) for g in grids]
+        model.amplitude = amps = [float(g.max() - g.min()) for g in grids]
     model.relative_amplitude = float(max(amps) / max(sigma_pix, 1e-12))
     if model.relative_amplitude < GRADIENT_MIN_RELATIVE:
         model.reason = f"No significant gradient (model amplitude {model.relative_amplitude:.2f} x pixel noise)."
@@ -213,6 +259,15 @@ def fit_gradient(u: np.ndarray, stat_weight: np.ndarray, star_hard: np.ndarray |
 
 def gradient_map(model: GradientModel, h: int, w: int, dtype=np.float32) -> np.ndarray:
     """Zero-median model per channel at full resolution (H x W or H x W x C)."""
+    if model.kind == "spline":
+        from .ai.tiles import resize_linear
+
+        pts = np.asarray(model.spline_points)
+        scale = float(model.choice.get("spline_scale", 1.0))
+        grids = [_spline_grid(pts, np.asarray(v), model.spline_smoothing) * scale for v in model.spline_values]
+        full = resize_linear(np.stack(grids, -1).astype(np.float32), h, w)
+        out = [(full[..., c] - off).astype(dtype) for c, off in enumerate(model.offsets)]
+        return out[0] if len(out) == 1 else np.stack(out, axis=-1)
     yy = np.linspace(-1.0 + 1.0 / h, 1.0 - 1.0 / h, h, dtype=np.float64)
     xx = np.linspace(-1.0 + 1.0 / w, 1.0 - 1.0 / w, w, dtype=np.float64)
     out = []

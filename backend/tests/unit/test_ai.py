@@ -50,7 +50,8 @@ def models(tmp_path, monkeypatch):
     patched = {}
     for mid, spec in registry.MODELS.items():
         kind = "zero" if spec.tool == "background" else "identity"
-        p = _model(d / spec.file, kind, spec.tool == "stars", "input" if spec.tool == "stars" else "gen_input_image")
+        nchw = spec.tool in ("stars", "sharpen")
+        p = _model(d / spec.file, kind, nchw, "input" if nchw else "gen_input_image")
         data = p.read_bytes()
         new = dataclasses.replace(spec, sha256=hashlib.sha256(data).hexdigest(), size=len(data), url=p.as_uri())
         (d / (spec.file + registry.VERIFIED_SUFFIX)).write_text(new.sha256, encoding="ascii")
@@ -155,6 +156,35 @@ def test_runner_falls_back_to_cpu_when_the_gpu_provider_fails(tmp_path, monkeypa
     assert np.allclose(run(b), b) and run.provider == "CPUExecutionProvider" and "device removed" in run.fallbacks[0]["message"]
 
 
+def test_worker_releases_ai_sessions_only_after_it_has_been_idle(monkeypatch):
+    """Cached models hold GPU memory (DirectML keeps several GB for the three tools): the worker frees them once idle."""
+    import queue
+    import threading
+
+    from app.services import worker
+
+    held = {"sessions": True, "dropped": 0}
+    monkeypatch.setattr(rt, "has_sessions", lambda: held["sessions"])
+
+    def drop():
+        held["dropped"] += 1
+        held["sessions"] = False
+        return True
+
+    monkeypatch.setattr(rt, "drop_sessions", drop)
+    task_q, result_q = queue.Queue(), queue.Queue()
+    monkeypatch.setattr(worker, "AI_IDLE_RELEASE_S", 60.0)
+    th = threading.Thread(target=worker.worker_main, args=(task_q, result_q, threading.Event(), None), daemon=True)
+    th.start()
+    th.join(timeout=2.5)  # one idle poll: still within the idle period, so the models stay loaded for the next image
+    assert held["dropped"] == 0
+    monkeypatch.setattr(worker, "AI_IDLE_RELEASE_S", 0.0)
+    th.join(timeout=2.5)
+    task_q.put(None)
+    th.join(timeout=5)
+    assert held["dropped"] == 1 and not th.is_alive()
+
+
 # ------------------------------------------------------------------------------ pipeline wiring
 def _linear_image():
     arr = linear_field(h=180, w=220, seed=4, gradient=(300.0, 200.0))
@@ -220,6 +250,39 @@ def test_star_brightness_dims_only_the_added_back_stars(models, monkeypatch):
     status = next(o for o in zero.report["operations"] if o["name"] == "star_brightness")
     assert status["status"] == "applied" and status["parameters"] == {"factor": 0.0, "domain": "display-only"}
     assert "Separated stars omitted" in zero.summary
+
+
+def test_layer_outputs_recompose_the_display_and_keep_the_linear_starless(models, monkeypatch):
+    img = _linear_image()
+    mask = img.pixels.mean(axis=-1) > np.percentile(img.pixels.mean(axis=-1), 99.5)
+
+    def split(proc, *_args):
+        stars = np.where(mask[..., None], proc * 0.6, 0.0).astype(proc.dtype)
+        return proc - stars, stars, {}
+
+    monkeypatch.setattr("app.processing.pipeline.separate_stars", split)
+    res = _run(img, AIRecipe(stars=True), models)
+    lay = res.layers
+    assert lay is not None and set(lay) == {"starless", "stars", "starless_linear"}
+    recomposed = np.clip(lay["starless"] + lay["stars"], 0, 1)
+    assert np.abs(recomposed - res.display).max() < 1e-5
+    assert float(lay["stars"][~mask].max()) == 0.0 and float(lay["stars"][mask].max()) > 0
+    assert np.allclose(lay["starless_linear"][~mask], res.processed[~mask])
+    assert (lay["starless_linear"][mask] < res.processed[mask]).all()
+    assert _run(img, AIRecipe(), models).layers is None  # no separation, no layers
+
+
+def test_ai_sharpening_runs_its_models_and_discloses_them(models):
+    img = _linear_image()
+    plain = _run(img, AIRecipe(), models)
+    res = _run(img, AIRecipe(sharpen=True, sharpen_amount=0.8, sharpen_stars=0.4), models)
+    op = next(o for o in res.report["operations"] if o["name"] == "ai_sharpen")
+    assert op["status"] == "applied", op
+    p = op["parameters"]
+    assert p["model"]["sha256"] == registry.MODELS[p["model"]["id"]].sha256 and p["stellar_amount"] == 0.4 and p["nonstellar_amount"] == 0.8
+    assert "ai_sharpen" in res.report["learned_processing"]
+    # identity stand-in models: the round trip through the temporary stretch and the tiling returns the same data
+    assert np.abs(res.processed - plain.processed).max() < 1e-3 * float(np.abs(plain.processed).max())
 
 
 def test_ai_smoothing_does_not_drive_a_deeper_stretch(models, monkeypatch):

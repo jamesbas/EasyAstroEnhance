@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent, PointerEvent } from 'react';
 import { api, readableError } from '../api/client';
-import type { CleanFrame, EditExportBody } from '../api/types';
+import type { AnnotationsBody, CleanFrame, EditExportBody, FramedObjects } from '../api/types';
 import { clamp } from '../lib/format';
 import { Modal } from './Modal';
 
 const INITIAL_FRAME = { rotation: 0, zoom: 1, pan_x: 0, pan_y: 0 };
+const NO_ANNOTATIONS: AnnotationsBody = { objects: false, hidden: [], max_mag: null, compass: false, scale_bar: false };
+
+function objectLabel(o: FramedObjects['objects'][number]): string {
+  return [o.name, o.common, o.mag !== null ? `mag ${o.mag.toFixed(1)}` : null].filter(Boolean).join(' · ');
+}
 
 // Framing (zoom + pan, no rotation) whose crop window lies inside the clean rectangle, keeping the image's aspect ratio.
 // Mirrors backend/app/processing/edit_export.py: window = (W/zoom, H/zoom); left = (W - window) * (pan + 1) / 2.
@@ -32,14 +37,29 @@ export function EditExportDialog({ runId, onClose, cleanFrame = null }: { runId:
   const [previewError, setPreviewError] = useState<{ request: EditExportBody; message: string } | null>(null);
   const [downloadError, setDownloadError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [ann, setAnn] = useState<AnnotationsBody>(NO_ANNOTATIONS);
+  const [framed, setFramed] = useState<FramedObjects | null>(null);
   const drag = useRef<{ id: number; x: number; y: number; px: number; py: number; w: number; h: number } | null>(null);
   const lookup = useRef(false);
   const userEditedTarget = useRef(false);
   const pendingTarget = includeTarget && !target.trim();
   const cleanCrop = useMemo(() => (cleanFrame ? cropToClean(cleanFrame) : null), [cleanFrame]);
   const previewRequest = useMemo<EditExportBody>(() => ({
-    ...frame, target: includeTarget ? target : '', label, format: 'png',
-  }), [frame, includeTarget, target, label]);
+    ...frame, target: includeTarget ? target : '', label, format: 'png', annotations: ann,
+  }), [frame, includeTarget, target, label, ann]);
+
+  // Objects inside the current framing (and whether labels are possible at all).
+  useEffect(() => {
+    let live = true;
+    const timer = window.setTimeout(() => {
+      api.framedObjects(runId, frame).then((f) => { if (live) setFramed(f); }, () => { if (live) setFramed(null); });
+    }, 250);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [runId, frame]);
+  const annotationsOk = framed?.compass_available ?? false;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -159,6 +179,32 @@ export function EditExportDialog({ runId, onClose, cleanFrame = null }: { runId:
             <p className="muted small" role="status">{targetHint}</p>
           </>
         )}
+        <fieldset className="annotations" data-testid="annotations">
+          <legend>Annotations</legend>
+          {!annotationsOk && <p className="muted small">{framed?.reason ?? 'Checking whether this image’s position on the sky is known…'}</p>}
+          <label className="check"><input type="checkbox" disabled={!annotationsOk || !framed?.available} checked={ann.objects}
+            onChange={(e) => setAnn((a) => ({ ...a, objects: e.target.checked }))} data-testid="annotate-objects" /> Label objects</label>
+          {annotationsOk && !framed?.available && framed?.reason && <p className="muted small">{framed.reason}</p>}
+          {ann.objects && framed && framed.objects.length > 0 && (
+            <ul className="object-list small" data-testid="annotate-object-list">
+              {framed.objects.map((o) => (
+                <li key={o.name}>
+                  <label className="check">
+                    <input type="checkbox" checked={!ann.hidden.includes(o.name)}
+                      onChange={(e) => setAnn((a) => ({ ...a, hidden: e.target.checked ? a.hidden.filter((n) => n !== o.name) : [...a.hidden, o.name] }))} />
+                    {objectLabel(o)}
+                  </label>
+                </li>
+              ))}
+            </ul>
+          )}
+          {ann.objects && framed && framed.objects.length === 0 && <p className="muted small">No catalogued objects in this framing.</p>}
+          <label className="check"><input type="checkbox" disabled={!annotationsOk} checked={ann.compass}
+            onChange={(e) => setAnn((a) => ({ ...a, compass: e.target.checked }))} data-testid="annotate-compass" /> Compass (north and east)</label>
+          <label className="check"><input type="checkbox" disabled={!annotationsOk} checked={ann.scale_bar}
+            onChange={(e) => setAnn((a) => ({ ...a, scale_bar: e.target.checked }))} data-testid="annotate-scale" /> Scale bar</label>
+          <p className="muted small">Drawn from the image’s measured position on the sky and the OpenNGC catalog; nothing in the picture is changed underneath.</p>
+        </fieldset>
         <label>Format <select value={format} onChange={(e) => setFormat(e.target.value === 'jpeg' ? 'jpeg' : 'png')}>
           <option value="png">PNG (16-bit)</option>
           <option value="jpeg">JPEG (for sharing)</option>

@@ -227,6 +227,30 @@ def test_gpu_denoise_detail_and_stretch_match_cpu(cuda):
 
 
 @pytest.mark.gpu
+def test_gpu_engine17_display_steps_match_cpu(cuda):
+    """Star color on an already separated star layer (scalar mask: failed on CuPy in engine 1.7.0), Star size and fine
+    sharpening, then whole runs with large-scale structure (Vivid) and surface mode (Moon & planets)."""
+    from app.processing import pipeline as pl
+
+    cpu, gpu = NumpyBackend(), get_backend("gpu")
+    rng = np.random.default_rng(5)
+    stars = (rng.random((90, 110, 3)) ** 8).astype(np.float32)
+    tol(gpu.asnumpy(fin.star_color(gpu.xp, gpu.asarray(stars), 1.0, 0.4)), fin.star_color(np, stars, 1.0, 0.4), "star color, scalar mask")
+    S = stars.mean(-1)
+    tol(gpu.asnumpy(pl._shrink_stars(gpu, gpu.asarray(S), 2, 0.6)), pl._shrink_stars(cpu, S, 2, 0.6), "star size")
+    L = synthetic_field(h=120, w=140, seed=4)[0].mean(-1).astype(np.float32)
+    w = np.ones(L.shape, np.float32)
+    fp = fin.FineSharpenParams(0.6, (0.004, 0.003, 0.002, 0.001))
+    tol(gpu.asnumpy(fin.fine_sharpen(gpu, gpu.asarray(L), gpu.asarray(w), fp)), fin.fine_sharpen(cpu, L, w, fp), "fine sharpen")
+    img = make_image(linear_field(h=170, w=210, seed=2), domain="linear", fmt="fits", dtype="float32", bits=32)
+    for name in ("vivid", "moon-planets"):
+        r = builtin_presets()[name]
+        c, g = run(img, r, device="cpu"), run(img, r, device="gpu", gpu_available=True)
+        assert g.report["execution"]["actual_backend"] == "gpu" and not g.report["execution"]["fallbacks"]
+        assert np.abs(np.rint(g.display * 255) - np.rint(c.display * 255)).max() <= 1, name
+
+
+@pytest.mark.gpu
 @pytest.mark.parametrize("kind", ["rendered_rgb", "rendered_mono", "linear_rgb"])
 def test_gpu_pipeline_parity_with_cpu_reference(cuda, kind):
     if kind == "linear_rgb":

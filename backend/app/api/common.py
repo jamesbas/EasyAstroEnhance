@@ -137,6 +137,8 @@ def serialize_asset(db: Database, coord: Coordinator, cfg: Config, a: dict[str, 
             "total_exposure_s": (r.get("lights") or {}).get("total_exposure_s"), "drizzle": bool(r.get("drizzle")),
             "seconds": r.get("seconds"), "calibration": {k: (r.get("calibration") or {}).get(k, 0) for k in ("darks", "flats", "bias", "dark_flats")},
             "defective_pixels": ((r.get("calibration") or {}).get("defective_pixels") or {}).get("count"),
+            "mosaic_canvas": (r.get("mosaic") or {}).get("canvas"),
+            "saturation_warning": (r.get("saturation") or {}).get("warning"),
         }
     status = a["status"]
     if status == "failed":
@@ -178,5 +180,23 @@ def serialize_asset(db: Database, coord: Coordinator, cfg: Config, a: dict[str, 
         "latest_run": serialize_run(run) if run else None,
         "run_count": db.one("SELECT COUNT(*) AS n FROM runs WHERE asset_id=?", (a["id"],))["n"],
         "stack": stack_info,
+        "sky_solution": sky_solution_summary(cfg, a),
         "created_at": a["created_at"],
     }
+
+
+SKY_SUMMARY_KEYS = ("status", "source", "reason", "center", "center_ra", "center_dec", "scale_arcsec", "north_angle_deg", "field_deg",
+                    "mirrored", "sip", "matches", "rms_px", "brightest_fraction", "detected_stars", "seconds", "header_note", "hints")
+
+
+def sky_solution_summary(cfg: Config, a: dict[str, Any]) -> dict[str, Any] | None:
+    """The stored sky solution for the asset's current HDU (an intake change makes an older one stale), without WCS cards."""
+    import json
+
+    try:
+        sol = json.loads((cfg.assets_dir / a["id"] / "sky-solution.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if sol.get("hdu") != (a.get("interpretation") or {}).get("hdu") or sol.get("source_sha256") != a.get("sha256"):
+        return None
+    return {k: sol.get(k) for k in SKY_SUMMARY_KEYS}

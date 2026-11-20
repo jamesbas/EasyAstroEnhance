@@ -12,10 +12,10 @@ from fastapi import APIRouter, Request
 from fastapi.concurrency import run_in_threadpool
 
 from ..db import Database, new_id, now
-from ..models.api import FolderBrowseIn, StackCreate, StackFolders
+from ..models.api import FolderBrowseIn, SeestarScanIn, StackCreate, StackFolders
 from ..processing.imagedata import ProcessingError
 from ..processing.stacking.stack import StackRequest, plan
-from ..services import folders
+from ..services import folders, seestar
 from ..services.queue import Coordinator
 from .common import STATUS_LABELS, ApiError, cfg_of, coord_of, db_of, settings_snapshot
 
@@ -25,7 +25,7 @@ router = APIRouter(prefix="/stacks", tags=["stacks"])
 def _request_of(body: StackFolders, **extra: Any) -> StackRequest:
     clean = lambda v: (v.strip().strip('"') or None) if v else None  # noqa: E731 - pasted Windows paths often carry quotes
     return StackRequest(folder=clean(body.folder) or "", mode=body.mode, darks=clean(body.darks), flats=clean(body.flats),
-                        bias=clean(body.bias), darkflats=clean(body.darkflats), **extra)
+                        bias=clean(body.bias), darkflats=clean(body.darkflats), mosaic=body.mosaic, **extra)
 
 
 async def _plan(req: StackRequest) -> dict[str, Any]:
@@ -39,7 +39,8 @@ def _summary(report: dict[str, Any] | None) -> dict[str, Any] | None:
     if not report:
         return None
     keys = ("mode", "frames_used", "frames_total", "rejected_frames", "registration", "integration", "drizzle", "calibration",
-            "normalization", "weights", "rejected_pixel_fraction", "seconds", "device", "device_note", "output", "lights", "excluded", "skipped")
+            "normalization", "weights", "rejected_pixel_fraction", "seconds", "device", "device_note", "output", "lights", "excluded", "skipped",
+            "mosaic", "saturation", "alignment", "sharpness")
     return {k: report[k] for k in keys if k in report}
 
 
@@ -57,8 +58,27 @@ def serialize_stack(db: Database, coord: Coordinator, s: dict[str, Any]) -> dict
 
 
 def _name_for(req: StackRequest) -> str:
-    stem = Path(req.folder).name or "Stack"
+    p = Path(req.folder)
+    if p.suffix.lower() == ".avi":  # a Moon / planet / Sun video
+        return p.stem.replace("-RAW", "")
+    stem = p.name or "Stack"
     return stem[:-4] if stem.lower().endswith("_sub") else stem
+
+
+@router.post("/seestar")
+async def seestar_scan(request: Request, body: SeestarScanIn) -> dict[str, Any]:
+    """Summarize a Seestar MyWorks folder by target (read-only). Without a path: the remembered or a likely folder."""
+    db = db_of(request)
+    recent = db.get_setting(folders.RECENT_SETTING, []) or []
+    remembered = db.get_setting(seestar.SETTING, None)
+    found = await run_in_threadpool(seestar.candidates, recent)
+    path = body.path or remembered or (found[0] if found else None)
+    if not path:
+        return {"path": None, "targets": [], "candidates": found}
+    out = await run_in_threadpool(seestar.scan, path)
+    if not out.get("error"):
+        db.set_setting(seestar.SETTING, out["path"])
+    return {**out, "candidates": found}
 
 
 @router.post("/browse")

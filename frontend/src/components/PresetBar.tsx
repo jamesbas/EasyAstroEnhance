@@ -7,7 +7,7 @@ import { cloneRecipe, PRESET_DESCRIPTIONS } from '../lib/recipe';
 import { Modal } from './Modal';
 
 // Built-in presets in the order they should be offered (the API lists them alphabetically).
-const BUILTIN_ORDER = ['auto', 'natural', 'vivid', 'faint-detail', 'bright-core', 'star-field', 'seestar-match'];
+const BUILTIN_ORDER = ['auto', 'natural', 'vivid', 'faint-detail', 'bright-core', 'star-field', 'moon-planets', 'seestar-match'];
 const order = (id: string) => {
   const i = BUILTIN_ORDER.indexOf(id);
   return i < 0 ? BUILTIN_ORDER.length : i;
@@ -38,7 +38,7 @@ function PresetPreviewStrip({ asset, recipe, presets, presetId, onSelect }: { as
       const items = presets.map((p) => {
         const r = cloneRecipe(p.recipe as Recipe);
         return { id: p.id, recipe: { ...recipe, look: r.look, advanced: { ...recipe.advanced, hdr_amount: r.advanced.hdr_amount, star_stretch_amount: r.advanced.star_stretch_amount },
-          auto_preset: r.auto_preset, preset: p.id, ai: { ...recipe.ai, background: false, denoise: false, stars: false } } };
+          auto_preset: r.auto_preset, preset: p.id, ai: { ...recipe.ai, background: false, denoise: false, stars: false, sharpen: false } } };
       });
       setResult({ assetId: asset.id, data: await api.presetPreviews(asset.id, items) });
     } catch (err) {

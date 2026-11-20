@@ -92,3 +92,10 @@ class _Timer:
 
 def sigma_tuple(a_ndim: int, sigma: float) -> tuple[float, ...]:
     return (sigma, sigma) if a_ndim == 2 else (sigma, sigma, 0.0)
+
+
+def disk_footprint(radius: int, ndim: int) -> np.ndarray:
+    """A flat disk over the two spatial axes (channels are filtered independently)."""
+    yy, xx = np.mgrid[-radius:radius + 1, -radius:radius + 1]
+    fp = (yy**2 + xx**2) <= radius * radius + 0.5
+    return fp if ndim == 2 else fp[..., None]

@@ -1,21 +1,48 @@
-# Benchmarks (synthetic data, Vivid preset, engine 1.6.0)
+# Benchmarks (synthetic data, Vivid preset, engine 1.7.0)
 
 Measured by `tools/benchmark.py`. CPU runs use up to 8 threads (parallel tiles; identical output to one full-frame pass). Hardware: {"cpu": "Intel64 Family 6 Model 198 Stepping 2, GenuineIntel", "cores": 24, "threads": 24, "ram_gb": 68.4, "gpu": "NVIDIA GeForce RTX 5070 Ti", "cc": "12.0", "vram_gb": 17.1, "cupy": "14.2.0", "cuda_runtime": 13020, "driver": 13030, "python": "3.12.10", "platform": "Windows-11-10.0.26300-SP0"}
 
-Cold start (first GPU run, 256x256): 0.27 s - includes CuPy import, CUDA context creation and NVRTC kernel compilation.
+Cold start (first GPU run, 256x256): 0.25 s - includes CuPy import, CUDA context creation and NVRTC kernel compilation.
 
 | Size | Path | CPU total (s) | CPU pixel group (s) | GPU total (s) | GPU pixel group (s) | GPU transfers (s) | H2D / D2H (MB) | Tile | Decode JPEG (s) | Encode PNG (s) | Peak RAM (MB) |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| 1920x1080 (2.1 MP, Seestar-like) | rendered | 3.79 | 0.82 | 3.26 | 0.28 | 0.259 | 108 / 50 | full | 0.04 | 0.16 | 1182 |
-| 1920x1080 (2.1 MP, Seestar-like) | linear | 5.37 | 0.93 | 4.71 | 0.32 | 0.299 | 108 / 75 | full | 0.04 | 0.36 | 1292 |
-| 2560x1600 (4.1 MP) | rendered | 5.45 | 1.51 | 4.18 | 0.21 | 0.121 | 213 / 98 | full | 0.07 | 0.34 | 1859 |
-| 2560x1600 (4.1 MP) | linear | 8.14 | 1.68 | 6.79 | 0.41 | 0.289 | 213 / 147 | full | 0.06 | 0.70 | 1967 |
-| 3840x2160 (8.3 MP) | rendered | 8.23 | 2.87 | 5.78 | 0.46 | 0.234 | 431 / 199 | full | 0.12 | 0.64 | 3119 |
-| 3840x2160 (8.3 MP) | linear | 12.57 | 3.17 | 9.97 | 0.59 | 0.394 | 431 / 299 | full | 0.12 | 1.45 | 3342 |
-| 5120x4096 (21 MP) | rendered | 19.53 | 9.74 | 10.89 | 1.03 | 0.634 | 1091 / 503 | full | 0.28 | 1.61 | 5873 |
-| 5120x4096 (21 MP) | linear | 29.11 | 10.95 | 19.57 | 1.27 | 0.727 | 1091 / 755 | full | 0.29 | 3.57 | 6382 |
+| 1920x1080 (2.1 MP, Seestar-like) | rendered | 3.84 | 0.80 | 3.25 | 0.24 | 0.189 | 116 / 50 | full | 0.04 | 0.16 | 1188 |
+| 1920x1080 (2.1 MP, Seestar-like) | linear | 5.77 | 0.90 | 5.20 | 0.33 | 0.279 | 116 / 75 | full | 0.04 | 0.35 | 1301 |
+| 2560x1600 (4.1 MP) | rendered | 5.48 | 1.47 | 4.25 | 0.21 | 0.125 | 229 / 98 | full | 0.07 | 0.32 | 1849 |
+| 2560x1600 (4.1 MP) | linear | 8.75 | 1.67 | 7.48 | 0.43 | 0.214 | 229 / 147 | full | 0.06 | 0.69 | 1957 |
+| 3840x2160 (8.3 MP) | rendered | 8.48 | 2.84 | 6.12 | 0.48 | 0.293 | 464 / 199 | full | 0.12 | 0.63 | 3136 |
+| 3840x2160 (8.3 MP) | linear | 13.82 | 3.24 | 11.21 | 0.61 | 0.391 | 464 / 299 | full | 0.12 | 1.41 | 3337 |
+| 5120x4096 (21 MP) | rendered | 20.05 | 9.82 | 11.41 | 1.10 | 0.641 | 1174 / 503 | full | 0.31 | 1.60 | 5887 |
+| 5120x4096 (21 MP) | linear | 32.03 | 10.92 | 22.20 | 1.33 | 0.737 | 1174 / 755 | full | 0.30 | 3.61 | 6431 |
+| 8192x6144 (50 MP) | rendered | 42.45 | 17.86 | 27.73 | 3.06 | 1.818 | 2962 / 1208 | 5952 | 0.63 | 3.91 | 15089 |
+| 8192x6144 (50 MP) | linear | 65.58 | 20.19 | 49.50 | 3.56 | 2.099 | 2962 / 1812 | 5952 | 0.62 | 9.65 | 16417 |
 
 Peak RAM is the process working-set peak so far (sizes run in ascending order).
+
+## Engine 1.7 (Phase 3) compared with engine 1.6
+
+Engine 1.7 changes outputs (spec amendments 1.7 and 1.9). With every optional tool off, rendered runs are unchanged in
+time; linear runs add the always-on row/column banding measurement and, with the Vivid preset used here (Contrast 0.5),
+the large-scale structure band — about 1.2 s at 8.3 MP on either device. The optional tools cost extra only when
+switched on (measured on the real 8.3 MP M31 stack): sky solving 1.9–2.5 s per image (once; stored with the image),
+Accurate star colours 0.9 s, AI sharpening ≈ 12 s on the RTX 5070 Ti (DirectML), Star size 1.1 s; layer exports are
+made only when downloaded. The banding check itself is 0.9 s of the linear-run increase.
+
+| Size | Path | CPU 1.6 (s) | CPU 1.7 (s) | GPU 1.6 (s) | GPU 1.7 (s) |
+|---|---|---|---|---|---|
+| 2.1 MP | rendered | 3.79 | 3.84 | 3.26 | 3.25 |
+| 2.1 MP | linear | 5.37 | 5.77 | 4.71 | 5.20 |
+| 4.1 MP | rendered | 5.45 | 5.48 | 4.18 | 4.25 |
+| 4.1 MP | linear | 8.14 | 8.75 | 6.79 | 7.48 |
+| 8.3 MP | rendered | 8.23 | 8.48 | 5.78 | 6.12 |
+| 8.3 MP | linear | 12.57 | 13.82 | 9.97 | 11.21 |
+| 21 MP | rendered | 19.53 | 20.05 | 10.89 | 11.41 |
+| 21 MP | linear | 29.11 | 32.03 | 19.57 | 22.20 |
+
+Stacking (real Seestar data, target PC): NGC 7000 mosaic, 6 subs → 1337 × 2150 in 5 s; IC 1805 mosaic, 84 subs (41
+panels) → 2713 × 3113 in 50 s; lunar RAW video, 1495 frames (536 × 960) → 374 frames used in 26 s; Jupiter RAW video,
+1581 frames (264 × 480) → 395 used in 5 s.
+
 ## Engine 1.6 (Phase 2) compared with engine 1.5 after phase 1
 
 Engine 1.6 changes outputs (spec amendment 1.8), so this is a cost comparison, not an identity check. Rendered runs

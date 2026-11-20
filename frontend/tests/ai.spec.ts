@@ -32,7 +32,7 @@ test.describe('AI tools', () => {
     await expect(section).toContainText('GraXpert denoising');
     await expect(section).toContainText('CC BY-NC-SA 4.0');
     await expect(section).toContainText('Dark Star');
-    await expect(section.locator('tr')).toHaveCount(4);
+    await expect(section.locator('tr')).toHaveCount(9);  // 4 models of the first three tools + 5 AI sharpening models
     expect(errors).toEqual([]);
   });
 

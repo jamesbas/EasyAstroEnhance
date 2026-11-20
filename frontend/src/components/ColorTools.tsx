@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { api, readableError } from '../api/client';
 import type { Asset, ObjectColorRecipe, Recipe } from '../api/types';
+import { Switch } from './Controls';
+import { SkySolutionPanel } from './SkySolutionPanel';
 
 type Props = {
   asset: Asset | null;
@@ -10,6 +12,7 @@ type Props = {
   hubbleStrength: number;
   onHubbleStrength: (strength: number) => void;
   onAssetUpdated: (asset: Asset) => void;
+  starsReady: boolean;
 };
 const HUES: { key: keyof ObjectColorRecipe; label: string }[] = [
   { key: 'reds', label: 'Red / orange' },
@@ -49,7 +52,7 @@ function useColorPreview(id: string | undefined, { reds, greens, blues }: Object
 
 const NEUTRAL: ObjectColorRecipe = { reds: 0, greens: 0, blues: 0 };
 
-export function ColorTools({ asset, recipe, edit, busy, hubbleStrength, onHubbleStrength, onAssetUpdated }: Props) {
+export function ColorTools({ asset, recipe, edit, busy, hubbleStrength, onHubbleStrength, onAssetUpdated, starsReady }: Props) {
   const [open, setOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [mask, setMask] = useState(false);
@@ -87,7 +90,7 @@ export function ColorTools({ asset, recipe, edit, busy, hubbleStrength, onHubble
     try {
       const imported = await api.importCatalog(file);
       setCatalog(imported);
-      edit((r) => { r.catalog_sha256 = imported.sha256; });
+      edit((r) => { r.catalog_sha256 = imported.sha256; r.catalog_builtin = false; });
     } catch (err) {
       setCatalogError(readableError(err));
     } finally {
@@ -145,8 +148,22 @@ export function ColorTools({ asset, recipe, edit, busy, hubbleStrength, onHubble
           </details>
         )}
       </details>
-      <details className="manage">
-        <summary>Catalog color{recipe.catalog_sha256 ? ' (on)' : ''}</summary>
+      <details className="manage" data-testid="star-colour-tools">
+        <summary>Star colour{recipe.catalog_builtin ? ' (accurate)' : recipe.catalog_sha256 ? ' (my catalog)' : ''}</summary>
+        <div className={`option-row${recipe.catalog_builtin ? ' on' : ''}`}>
+          <div className="option-head">
+            <Switch checked={recipe.catalog_builtin} disabled={!catalogReady} label="Accurate star colours" testId="switch-catalog-builtin" describedBy="hint-catalog-builtin"
+              onChange={(v) => edit((r) => { r.catalog_builtin = v; if (v) r.catalog_sha256 = null; })} />
+          </div>
+          <p className="option-hint" id="hint-catalog-builtin">
+            Sets the colour balance from the measured colours of catalog stars (Gaia) found in the frame, instead of assuming the average star is white.
+            Needs the star catalog and the image’s position on the sky; when either is missing, normal white balance is used and the report says why.
+          </p>
+          {!catalogReady && <p className="muted small">For linear broadband RGB FITS stacks.</p>}
+          {catalogReady && asset && <SkySolutionPanel asset={asset} starsReady={starsReady} onAssetUpdated={onAssetUpdated} />}
+        </div>
+        <details className="manage">
+        <summary>Use my own catalog{recipe.catalog_sha256 ? ' (on)' : ''}</summary>
         <p className="muted small">For solved, unstretched broadband FITS. Import a local CSV with ra_deg, dec_deg, r_over_g and b_over_g. Gaia BP/RP magnitudes are not RGB ratios.</p>
         <label className="field">
           <span>Reference star CSV</span>
@@ -161,6 +178,7 @@ export function ColorTools({ asset, recipe, edit, busy, hubbleStrength, onHubble
           </>
         )}
         {catalogError && <p className="err-text small" role="alert">{catalogError}</p>}
+        </details>
       </details>
       <details className="manage">
         <summary>Stretch method{recipe.focus_stretch.enabled ? ' (focused)' : ''}</summary>

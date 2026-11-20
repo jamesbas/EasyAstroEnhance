@@ -201,6 +201,31 @@ def apply_stretch(xp, x, sp: StretchParams):
     return mtf(xp, sp.m, v)
 
 
+SURFACE_HI_DISPLAY = 0.88
+
+
+def surface_params(sp: StretchParams) -> StretchParams:
+    """Moon, Sun and planets: the sky median goes to black and the midtones are not lifted (MTF identity), so the
+    bright surface keeps its tonal range instead of being pushed to white by a sky-anchored lift. The white point is
+    lowered (never below the bright surface level ``hi_level``) until that level displays at ``SURFACE_HI_DISPLAY``."""
+    from dataclasses import replace
+
+    def parts(white: float) -> tuple[float, float]:
+        floor = min(max(float(_curve(np, np.float64(sp.sky_level / white), sp.D, sp.b, sp.pivot)), 0.0), 0.5)
+        top = float(_curve(np, np.float64(min(sp.hi_level / white, 1.0)), sp.D, sp.b, sp.pivot))
+        return floor, (top - floor) / (1.0 - floor)
+
+    white = sp.white
+    if sp.hi_level > sp.sky_level and parts(white)[1] < SURFACE_HI_DISPLAY:
+        lo, hi = sp.hi_level, sp.white
+        for _ in range(40):
+            mid = 0.5 * (lo + hi)
+            lo, hi = (lo, mid) if parts(mid)[1] >= SURFACE_HI_DISPLAY else (mid, hi)
+        white = hi
+    floor, out_hi = parts(white)
+    return replace(sp, white=white, m=0.5, floor=floor, target=0.0, hi_display=out_hi, d_source=f"{sp.d_source}, surface display")
+
+
 def _chain_parts(sky: float, sigma: float, hi: float, white: float, target: float, D: float, b: float,
                  pivot: float | None = None, floor_sigmas: float = FLOOR_SIGMAS):
     Hs = float(_curve(np, np.float64(sky / white), D, b, pivot))

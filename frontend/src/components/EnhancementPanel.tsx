@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import type { AITool, Asset, AutoPresetChoice, Job, Preset, Recipe, Strength } from '../api/types';
 import type { AIModels } from '../hooks/useAIModels';
+import type { ReferenceData } from '../hooks/useReferenceData';
 import type { LiveStatus } from '../hooks/useLivePreview';
 import { usePersistent } from '../hooks/usePersistent';
 import { backgroundPending, isMono } from '../lib/recipe';
@@ -30,6 +31,7 @@ export interface EnhancementPanelProps {
   edit: (mutate: (r: Recipe) => void) => void;
   setAI: (tool: AITool, on: boolean) => void;
   aiModels: AIModels;
+  referenceData: ReferenceData;
   selectPreset: (id: string) => void;
   savePreset: (name: string) => Promise<void>;
   reloadPresets: () => Promise<void>;
@@ -110,7 +112,8 @@ export function EnhancementPanel(p: EnhancementPanelProps) {
   const hasLabelRegion = asset !== null && asset.regions.length > 0;
   const busy = p.submitting || p.jobs.length > 0;
   const hiddenOn = [
-    recipe.ai.background && 'AI background', recipe.ai.denoise && 'AI noise reduction', recipe.ai.stars && 'AI star separation',
+    recipe.ai.background && 'AI background', recipe.ai.denoise && 'AI noise reduction', recipe.ai.stars && 'AI star separation', recipe.ai.sharpen && 'AI sharpening',
+    recipe.catalog_builtin && 'accurate star colours',
     recipe.background.enabled && 'background from sky samples', !recipe.tone.enabled && 'stretch off',
   ].filter(Boolean) as string[];
 
@@ -147,7 +150,8 @@ export function EnhancementPanel(p: EnhancementPanelProps) {
 
         {!simple && (<>
         <AIToolsPanel ai={recipe.ai} asset={asset} models={p.aiModels} onToggle={p.setAI}
-          onStarBrightness={(factor) => p.edit((r) => { r.ai.star_brightness = factor; })} />
+          onStarBrightness={(factor) => p.edit((r) => { r.ai.star_brightness = factor; })}
+          onChange={(patch) => p.edit((r) => { Object.assign(r.ai, patch); })} />
 
         <div className="options">
           <OptionRow id="background" label="Correct background from my sky samples" checked={recipe.background.enabled} strength={recipe.background.strength}
@@ -174,13 +178,14 @@ export function EnhancementPanel(p: EnhancementPanelProps) {
 
         <ToneControls tone={recipe.tone} histogram={asset?.baseline?.histogram ?? null} edit={p.edit} />
         <ColorTools asset={asset} recipe={recipe} edit={p.edit} busy={busy} hubbleStrength={p.hubbleStrength}
-          onHubbleStrength={p.onHubbleStrength} onAssetUpdated={p.onAssetUpdated} />
+          onHubbleStrength={p.onHubbleStrength} onAssetUpdated={p.onAssetUpdated} starsReady={p.referenceData.starsReady} />
 
         {asset && (
           <LabelRegionTool asset={asset} tool={p.tool} lineY={p.labelLineY} onTool={p.onTool} onLineY={p.onLabelLine} onAssetUpdated={p.onAssetUpdated} />
         )}
 
-        <AdvancedPanel asset={asset} recipe={recipe} edit={p.edit} star={p.star} onChangeState={p.onChangeState} onAssetUpdated={p.onAssetUpdated} />
+        <AdvancedPanel asset={asset} recipe={recipe} edit={p.edit} star={p.star} onChangeState={p.onChangeState} onAssetUpdated={p.onAssetUpdated}
+          starsReady={p.referenceData.starsReady} />
         </>)}
       </div>
 
