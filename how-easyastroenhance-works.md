@@ -95,20 +95,23 @@ All four tools are **off by default**. If I turn one on, the model runs on my ow
   **Star size** below 100% shrinks each separated star's glow toward its core in the enhanced view, and **Starless** and
   **Stars only** layers can be downloaded separately.
 - **AI sharpening** (Seti Astro's Cosmic Clarity Sharpen) tightens stars and fine structure blurred by seeing and focus.
-  It doesn't enlarge the image or invent resolution, and it leaves the background noise alone.
+  It doesn't enlarge the image or invent resolution. It sharpens only detail that stands out from the stack's own
+  noise, so the background and smooth nebula or galaxy glow stay smooth.
 
 None draws new stars, fills in missing sky, or works from someone else's image. Strong cleanup can soften faint
 features or dim a faint halo, so I check the before and after. The report names any model actually used.
 
 ### Step 3: Compare and share
 
-I can compare the original and the result side by side or switch between saved results. I can export a PNG, JPEG,
+I can compare the original and the result side by side or switch between saved results. If a step went too far, I
+can remove it from the result, undo a change, or go back to an earlier result. I can export a PNG, JPEG,
 16-bit TIFF, a before/after comparison JPEG, or a processed FITS for FITS input. The standard processed FITS export
 omits location and observer fields; there's a separate full-metadata option if I want those included.
 
 For a sharing copy, **Edit export…** lets me rotate, zoom and frame the enhanced image, and put my name or
-the target name on a separate PNG or JPEG. When the image's position on the sky is known, it can also label the
-galaxies, nebulae and clusters in the frame (OpenNGC catalog) and add a compass and a scale bar.
+the target name on a separate PNG or JPEG, in the font, colour, position and size I choose. It finds the image's
+position on the sky by itself, so it can also label the galaxies, nebulae and clusters in the frame (OpenNGC catalog)
+and add a compass and a scale bar.
 
 The result comes with a summary and a downloadable report that records the app version, settings, steps that ran
 or were skipped, and why. That's the best place to check what actually happened before I describe the processing.
