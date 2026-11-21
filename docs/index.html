@@ -34,7 +34,7 @@
         <h1 id="hero-title">Bring out what your <em>telescope captured.</em></h1>
         <p class="lede">Bring faint galaxies, nebulae, and star fields into view. Stack, enhance, and compare your photos in one Windows app built for beginners.</p>
         <div class="actions">
-          <a class="button download" href="https://github.com/jamesbas/EasyAstroEnhance/releases/download/v1.5.0/EasyAstroEnhance-1.5.0-Windows-x64-Setup.exe">
+          <a class="button download" href="https://github.com/jamesbas/EasyAstroEnhance/releases/download/v1.7.0/EasyAstroEnhance-1.7.0-Windows-x64-Setup.exe">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/>
             </svg>
@@ -42,7 +42,7 @@
           </a>
           <a class="button secondary" href="#quick-start">See how it works <span aria-hidden="true">&darr;</span></a>
         </div>
-        <p class="version">Windows 11 x64 (Intel/AMD) &middot; v1.5.0 preview &middot; 87 MiB</p>
+        <p class="version">Windows 11 x64 (Intel/AMD) &middot; v1.7.0 preview &middot; 87 MiB</p>
         <p class="version">No account, developer tools, or administrator access required.</p>
       </div>
 
@@ -92,7 +92,7 @@
         <article class="card">
           <p class="card-label">02 / Stack</p>
           <h3>Combine exposures</h3>
-          <p>Stack individual FITS exposures or combine stacks of the same target from several nights. Already have a telescope stack? Enhance it directly.</p>
+          <p>Stack individual FITS exposures, Seestar mosaics, or Moon and planet videos, or combine stacks from several nights. Already have a telescope stack? <strong>Import from Seestar</strong> adds the newest one in one click.</p>
         </article>
         <article class="card">
           <p class="card-label">03 / Compare</p>
@@ -113,15 +113,15 @@
           </li>
           <li>
             <h3>Add a photo and enhance</h3>
-            <p>Start with a telescope JPEG or a stack you already have. Pick <strong>Natural</strong> and click <strong>Enhance selected</strong>. Leave the AI switches off for your first run.</p>
+            <p>Start with a telescope JPEG or a stack you already have &mdash; Seestar owners can use <strong>Import from Seestar&hellip;</strong>. Keep the default <strong>Auto</strong> preset, which picks a style for your image, and click <strong>Enhance selected</strong>. Leave the AI switches off for your first run.</p>
           </li>
           <li>
             <h3>Compare and save</h3>
             <p>Check the original against the enhanced image, then choose <strong>Download PNG</strong>. For the steps used and their timings, open <strong>More formats &rarr; Processing report (JSON)</strong>.</p>
           </li>
         </ol>
-        <p class="callout" id="star-brightness"><strong>Star brightness.</strong> On a confirmed linear stack, turn on <strong>AI star separation</strong> to show the slider. Leave it at 100% for the usual blend, lower it to dim stars, or set it to 0% and run <strong>Enhance</strong> again to leave out the stars the model separated. Some stars may remain. Your original and processed-linear FITS stay unchanged.</p>
-        <p class="callout" id="edit-export"><strong>New: Edit export.</strong> Below a finished image, choose <strong>Edit export&hellip;</strong> to rotate, zoom, and frame a separate PNG or JPEG. Add your own text or include the target name from the FITS header when available. Your regular downloads are unchanged.</p>
+        <p class="callout" id="whats-new"><strong>New in 1.7.</strong> <strong>Auto</strong> picks the look for each image, including a new <strong>Moon &amp; planets</strong> style. <strong>Live preview</strong> shows slider changes on the image before you save. <strong>Import from Seestar&hellip;</strong> lists your targets and stacks mosaics and planet videos. <strong>Accurate star colours</strong> balances colour from the Gaia star catalog, and <strong>Edit export&hellip;</strong> can label galaxies and nebulae and add a compass and scale bar.</p>
+        <p class="callout" id="star-brightness"><strong>Optional AI tools.</strong> Background extraction, noise reduction, star separation and the new <strong>AI sharpening</strong> are all off until you switch them on. With star separation on a linear stack, <strong>Star brightness</strong> and <strong>Star size</strong> dim or shrink the stars, and the starless and stars-only layers can be downloaded. Your original and processed-linear FITS keep their stars.</p>
         <p class="callout"><strong>Using a PC without a GPU?</strong> Standard enhancement works on the CPU. Optional AI tools need separate model downloads and can take much longer on the CPU, especially noise reduction on larger images.</p>
       </div>
     </section>
@@ -132,15 +132,15 @@
       <div class="faqs">
         <details>
           <summary>Is this a web app or a Windows app?</summary>
-          <p>This site introduces the app and links to the installer. The installed Windows app shows its controls in your default browser, but processes photos on your PC. Standard enhancement works offline after installation. To quit, close the EasyAstroEnhance console window, not just the browser tab.</p>
+          <p>This site introduces the app and links to the installer. The installed Windows app shows its controls in your default browser, but processes photos on your PC. Standard enhancement works offline after installation; AI models and the optional star and object catalogs are one-time downloads when you choose them. To quit, close the EasyAstroEnhance console window, not just the browser tab.</p>
         </details>
         <details>
           <summary>Why might Windows show a warning?</summary>
-          <p>The current installer is an unsigned preview. Windows SmartScreen may show a warning. Use the download from this page or the <a href="https://github.com/jamesbas/EasyAstroEnhance/releases/tag/v1.5.0">official release page</a> rather than an unofficial mirror.</p>
+          <p>The current installer is an unsigned preview. Windows SmartScreen may show a warning. Use the download from this page or the <a href="https://github.com/jamesbas/EasyAstroEnhance/releases/tag/v1.7.0">official release page</a> rather than an unofficial mirror.</p>
         </details>
         <details>
           <summary>How do I update or uninstall?</summary>
-          <p>Quit the app and find EasyAstroEnhance in <strong>Windows Settings &rarr; Apps &rarr; Installed apps</strong>. Choose <strong>Uninstall</strong>. To update, run the new installer under the same Windows account. Uninstalling keeps your history, presets, exports, and downloaded AI models.</p>
+          <p>Quit the app and find EasyAstroEnhance in <strong>Windows Settings &rarr; Apps &rarr; Installed apps</strong>. Choose <strong>Uninstall</strong>. To update, run the new installer under the same Windows account. Uninstalling keeps your history, presets, exports, and downloaded AI models and catalogs.</p>
         </details>
       </div>
     </section>
