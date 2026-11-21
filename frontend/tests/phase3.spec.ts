@@ -67,14 +67,15 @@ test.describe('higher-end tools: reference data, AI sharpening, star colour, ann
     expect(errors).toEqual([]);
   });
 
-  test('Edit export explains why annotations are unavailable without a sky position', async ({ page }) => {
+  test('Edit export explains what annotations need when the star catalog is missing', async ({ page }) => {
     await page.goto('/');
     await uploadAndWaitReady(page);
     await page.getByTestId('enhance-selected').click();
     await expect(page.getByTestId('asset-status').first()).toHaveText(/^Complete/, { timeout: 60_000 });
     await page.getByRole('button', { name: 'Edit export…' }).click();
     const box = page.getByTestId('annotations');
-    await expect(box).toContainText('Find where this image points on the sky first');
+    // No star catalog in the test data folder, so the dialog can't find the sky position by itself: it says what to download.
+    await expect(box).toContainText('Annotations need the star catalog');
     await expect(page.getByTestId('annotate-objects')).toBeDisabled();
     await expect(page.getByTestId('annotate-compass')).toBeDisabled();
 

@@ -17,7 +17,7 @@ const TOOLS: { tool: AITool; label: string; hint: string; linearOnly: boolean }[
   },
   {
     tool: 'sharpen', label: 'AI sharpening', linearOnly: true,
-    hint: 'Cosmic Clarity sharpens fine structure and tightens stars blurred by seeing and focus. Replaces deconvolution; skipped on very noisy images.',
+    hint: 'Cosmic Clarity sharpens fine structure and tightens stars blurred by seeing and focus. Replaces deconvolution. Only detail that stands out from the image’s noise is sharpened, so smooth or noisy areas stay smooth.',
   },
 ];
 

@@ -24,6 +24,7 @@ from ..processing.pipeline import ExecutionOptions, choose_backend
 from ..processing.recipe import PIPELINE_VERSION, parse_recipe
 from ..processing.report import dependency_versions
 from .retention import prune_runs
+from .results import next_serial, set_current
 from .worker import worker_main
 
 
@@ -450,9 +451,10 @@ class Coordinator:
                     "state": hit["state"], "run_id": hit["id"], "stage": None, "finished_at": now(),
                     "notes": [{"kind": "cache", "message": "An identical result already existed and was reused; no work was repeated."}],
                 })
+                set_current(self.db, asset["id"], hit["id"])  # the reused result is the one shown
                 self.recompute_job(item["job_id"])
                 return
-        serial = int(self.db.one("SELECT COUNT(*) AS n FROM runs WHERE asset_id=?", (asset["id"],))["n"]) + 1
+        serial = next_serial(self.db, asset["id"])
         run_id = new_id("run_")
         safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in Path(asset["filename"]).stem[:40]) or "image"
         run_name = f"{safe}__{asset['sha256'][:8]}__run-{serial:03d}"
@@ -556,6 +558,7 @@ class Coordinator:
                 "exports": payload["exports"], "report_path": payload["report_path"], "needs_review": int(payload["needs_review"]), "backend_label": payload["backend_label"],
             })
             self.db.update("job_items", item_id, {"state": payload["state"], "run_id": cur["run_id"], "notes": notes, "finished_at": t, "stage": None, "backend_label": payload["backend_label"]})
+            set_current(self.db, cur["asset_id"], cur["run_id"])
             try:
                 prune_runs(self.cfg, self.db, cur["asset_id"])
             except Exception:  # retention is housekeeping; never fail a finished run because of it

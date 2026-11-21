@@ -24,6 +24,7 @@ export interface AutoRecipe {
   star_stretch: boolean;
   cosmetic: boolean;
   halo_reduction: boolean;
+  banding: boolean;
 }
 
 export interface ToneRecipe {
@@ -92,6 +93,25 @@ export interface EditExportBody {
   label: string;
   format: 'png' | 'jpeg';
   annotations?: AnnotationsBody | null;
+  text_style?: TextStyle;
+  target_place?: TextPlacement;
+  label_place?: TextPlacement;
+}
+
+export type CaptionPosition = 'bottom-left' | 'bottom-center' | 'bottom-right' | 'top-left' | 'top-center' | 'top-right';
+
+export interface TextPlacement {
+  position: CaptionPosition;
+  /** relative to the standard caption size (0.5–3) */
+  size: number;
+}
+
+export interface TextStyle {
+  font: 'sans' | 'serif' | 'script' | 'mono';
+  /** #rrggbb */
+  color: string;
+  /** dark box behind the text; without it the text gets a dark outline */
+  box: boolean;
 }
 
 export interface AnnotationsBody {
@@ -106,7 +126,8 @@ export interface AnnotationsBody {
 export interface FramedObject {
   name: string;
   type: string;
-  common: string | null;
+  /** at most one common name, e.g. ["Pinwheel Galaxy"] */
+  common: string[];
   mag: number | null;
   major_arcmin: number | null;
 }
@@ -115,6 +136,8 @@ export interface FramedObjects {
   available: boolean;
   compass_available: boolean;
   reason: string | null;
+  /** no sky position is stored yet and one can be found now (the dialog does this by itself) */
+  solve_needed?: boolean;
   objects: FramedObject[];
 }
 
@@ -286,6 +309,7 @@ export interface Asset {
   thumb_url: string | null;
   preview_url: string | null;
   latest_item: JobItem | null;
+  /** the current result: the newest one unless the user went back to an earlier one (or an identical one was reused) */
   latest_run: Run | null;
   run_count: number;
   stack: AssetStackInfo | null;

@@ -52,4 +52,16 @@ def test_edit_export_uses_fits_target_and_does_not_change_master_exports(client,
         assert im.format == "JPEG" and im.size == (90, 120)
         assert json.loads(im.info["comment"])["pan_x"] == 1
     assert client.post(path, json={"zoom": 0}).status_code == 422
+    styled = client.post(path, json={**opts, "text_style": {"font": "script", "color": "#ffd080", "box": False},
+                                     "target_place": {"position": "top-center", "size": 1.5}, "label_place": {"position": "bottom-right", "size": 0.8}})
+    assert styled.status_code == 200
+    with Image.open(io.BytesIO(styled.content)) as im:
+        manifest = json.loads(im.info["EasyAstroEnhance"])
+        assert manifest["text_style"]["font"] == "script" and manifest["target_place"]["position"] == "top-center"
+    assert not np.array_equal(imagecodecs.png_decode(styled.content)[:60], bare[:60])  # the target name moved to the top
+    assert client.post(path, json={**opts, "text_style": {"color": "red"}}).status_code == 422
+    assert client.post(path, json={**opts, "label_place": {"position": "middle"}}).status_code == 422
+    # No star catalog in the test data folder: annotations explain what to download and don't try to solve.
+    objects = client.post(path + "/objects", json={}).json()
+    assert objects["solve_needed"] is False and "star catalog" in objects["reason"]
     assert client.get(original_png).content == png_before and client.get(original_fits).content == fits_before

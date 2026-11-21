@@ -203,6 +203,8 @@ export const api = {
   retryStack: (id: string) => request<Stack>('POST', `/stacks/${id}/retry`),
   // runs
   listRuns: (assetId: string) => request<RunList>('GET', `/runs?asset_id=${encodeURIComponent(assetId)}`),
+  setCurrentRun: (assetId: string, runId: string) => request<Asset>('PUT', `/assets/${assetId}/current-run`, { run_id: runId }),
+  deleteRun: (runId: string) => request<{ deleted: string; current_run_id: string | null }>('DELETE', `/runs/${runId}`),
   getRun: (id: string) => request<RunDetail>('GET', `/runs/${id}`),
   editExportTarget: (id: string) => request<{ target: string | null }>('GET', `/runs/${id}/edit-export/target`),
   framedObjects: (id: string, framing: { rotation: number; zoom: number; pan_x: number; pan_y: number }) =>

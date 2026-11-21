@@ -61,6 +61,7 @@ export interface EnhancementPanelProps {
   onAssetUpdated: (a: Asset) => void;
   autoChoice: AutoPresetChoice | null;
   live: { on: boolean; onToggle: (on: boolean) => void; status: LiveStatus; current: boolean; error: string | null; seconds: number | null };
+  history: { canUndo: boolean; canRedo: boolean; onUndo: () => void; onRedo: () => void; onResetDefaults: () => void };
 }
 
 interface OptionRowProps {
@@ -130,6 +131,15 @@ export function EnhancementPanel(p: EnhancementPanelProps) {
     <aside className="panel" aria-label="Enhancement settings">
       <div className="panel-scroll">
         <div className="panel-mode">
+          <div className="history-buttons" role="group" aria-label="Settings history">
+            <button type="button" className="btn tiny" disabled={!p.history.canUndo} onClick={p.history.onUndo} data-testid="undo"
+              title="Undo the last settings change for this image (Ctrl+Z)">↶ Undo</button>
+            <button type="button" className="btn tiny" disabled={!p.history.canRedo} onClick={p.history.onRedo} data-testid="redo"
+              title="Redo (Ctrl+Shift+Z or Ctrl+Y)">Redo ↷</button>
+            <button type="button" className="btn tiny" onClick={p.history.onResetDefaults} data-testid="reset-defaults"
+              title="Back to the app's defaults: the Auto preset with every optional tool off. Your images, results and marked regions are kept; Undo brings your settings back.">
+              Reset to defaults</button>
+          </div>
           <div className="segmented small" role="group" aria-label="Controls shown">
             <button type="button" className={`seg${simple ? ' active' : ''}`} aria-pressed={simple} onClick={() => setMode('simple')} data-testid="panel-simple">Simple</button>
             <button type="button" className={`seg${simple ? '' : ' active'}`} aria-pressed={!simple} onClick={() => setMode('all')} data-testid="panel-all">All controls</button>

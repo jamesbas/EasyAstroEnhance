@@ -3,6 +3,33 @@
 Historical performance baselines: engine **1.2.0**, recipe schema **4** · measured on the target PC (Windows 11, Intel Core Ultra 9 285K,
 64 GB RAM, NVIDIA GeForce RTX 5070 Ti 16 GB, driver 610.62 / CUDA 13.3, Python 3.12.10).
 
+## Engine 1.7.1 — AI sharpening without grain (spec amendment 1.12)
+
+| Item | Result |
+|---|---|
+| Cause of the blotches | User's IC 434 (386 × 10 s, LP) and M 101 (2491 frames) with all AI tools on: one setting at a time, only turning AI sharpening off removed the speckle (Detail 0 and classical denoise made no difference; 30 % strength still speckled). The gate used the noise measured after AI denoising (2.1× too low per pixel) and could not tell smooth bright areas from detail: in IC 434's smooth band the models added 1–3 px texture 4.2× the original noise there. |
+| Fix | Gate against the noise before noise reduction, plus a detail gate (fine structure ≥ 1.5×, full at 4× that noise) and deringing (never darker than the 5 × 5 neighbourhood). Same settings, re-rendered: IC 434's nebula and M 101's glow as smooth as with sharpening off; the Horsehead's edge, arms, core and stars still sharpened (2.2 % / 2.5 % of the frame); M 101's dust-lane dark dots gone. |
+| Tests | Backend 324 passed (new gate, detail and deringing test in `test_ai.py`); Playwright 35 passed. |
+
+## Edit export text, automatic sky position, Help (spec amendment 1.11, no engine change)
+
+| Item | Result |
+|---|---|
+| Why annotations "worked once" | Annotations need a stored sky position. Only the first M 101 stack had one (found earlier); the M 31 mosaic and the 2491-frame M 101 never did, and Edit export didn't find it by itself. All three FITS headers carry pointing hints, two also a WCS. |
+| Automatic sky position | Real M 101 (2491 frames, no WCS) through the browser: Edit export showed "Finding where this image points on the sky…", then 16 objects, compass and scale bar were available. API test covers the missing-catalog and stored-failure cases. |
+| Caption style | Visual check on M 101 with all four fonts, colours, box/outline, separate positions and sizes; captions in the compass and scale-bar corners move clear of them. Unit tests (positions, colour, box/outline, size, avoidance, fit, glyph coverage) and a browser test. |
+| Fixes found on the way | Pillow's built-in font has no é/ñ/×/—/′: names with accents printed boxes and the scale bar showed "10▯" — captions now use bundled Lato, the scale bar prints `10'`; the object list showed "M 101 · · mag 7.9" (an empty common-name list was printed) — fixed. |
+| Tests | Backend 323 passed; Playwright 35 passed (text style and Help added to `edit-export.spec.ts`). |
+
+## Reversing steps (spec amendment 1.10, no engine change)
+
+| Item | Result |
+|---|---|
+| Remove a step, Undo / Redo, Reset to defaults | Browser tests (`reverse.spec.ts`): a removed step's chip shows "(off)", the preset becomes Custom and the live preview appears; undo and redo by button and keyboard; two images keep separate histories; saving the preview; reset then undo. Checked visually on a finished result. |
+| Go back to / delete a result | API test (`test_going_back_to_an_earlier_result_and_deleting_results`): the chosen run becomes the asset's result, deleting the current one falls back to the newest, run numbers are not reused, busy images are refused; browser test confirms the delete prompt. |
+| Fixes found on the way | Re-enhancing with settings identical to an earlier run now shows that (reused) run instead of the newest; run numbers could repeat after a deletion (count + 1) — now never reused; *Repair row/column banding* had no switch in Advanced — added. |
+| Tests | Backend 312 passed; Playwright 34 passed (new `reverse.spec.ts`). |
+
 ## Engine 1.7 — higher-end capabilities (spec amendments 1.7 and 1.9)
 
 | Item | Result |

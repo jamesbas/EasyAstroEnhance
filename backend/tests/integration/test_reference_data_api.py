@@ -49,3 +49,41 @@ def test_corrupted_catalog_is_discarded_and_unpublished_catalogs_are_refused(cli
     assert not registry.group_ready(client.cfg.reference_data_dir, "stars")
     monkeypatch.setitem(registry.DATA, "stars-gaia-dr3", dataclasses.replace(bad, sha256=""))
     assert client.post("/api/v1/reference-data/stars/download").status_code == 409
+
+
+def test_edit_export_finds_the_sky_position_itself_once_the_star_catalog_is_installed(client, fake_reference, tmp_path):
+    """Annotations ask the dialog to solve (no trip to Advanced) only when it can work; a failed attempt is kept with the
+    image, is not retried and says what to do instead."""
+    import json
+    import sqlite3
+
+    import numpy as np
+    from astropy.io import fits
+
+    from conftest import linear_field
+    from integration.test_jpeg_slice import default_recipe, ready, run_job, upload
+
+    path = tmp_path / "field.fits"
+    fits.PrimaryHDU(linear_field(h=120, w=160, seed=2)[..., 0].astype(np.float32)).writeto(path)
+    asset = ready(client, upload(client, path)["id"])
+    client.patch(f"/api/v1/assets/{asset['id']}/interpretation", json={"state": "linear"})
+    ready(client, asset["id"])
+    run_id = run_job(client, [asset["id"]], default_recipe(client))["items"][0]["run_id"]
+
+    def objects():
+        return client.post(f"/api/v1/runs/{run_id}/edit-export/objects", json={}).json()
+
+    assert objects()["solve_needed"] is False and "star catalog" in objects()["reason"]
+    assert client.post("/api/v1/reference-data/stars/download").status_code == 202
+    wait_for(lambda: _group(client, "stars")["state"] == "installed", timeout=30)
+    o = objects()
+    assert o["solve_needed"] is True and not o["compass_available"]
+
+    db = sqlite3.connect(client.cfg.data_dir / "app.db")
+    sha, interp = db.execute("SELECT sha256, interpretation FROM assets WHERE id=?", (asset["id"],)).fetchone()
+    db.close()
+    failed = {"status": "unavailable", "reason": "Only 4 stars were detected; at least 10 are needed to solve.",
+              "hdu": json.loads(interp).get("hdu"), "source_sha256": sha}
+    (client.cfg.assets_dir / asset["id"] / "sky-solution.json").write_text(json.dumps(failed), encoding="utf-8")
+    o = objects()
+    assert o["solve_needed"] is False and "Only 4 stars" in o["reason"] and "Sky position" in o["reason"]

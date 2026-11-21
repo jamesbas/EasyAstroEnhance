@@ -107,6 +107,22 @@ class AnnotationsIn(BaseModel):
     scale_bar: bool = False
 
 
+CaptionPosition = Literal["bottom-left", "bottom-center", "bottom-right", "top-left", "top-center", "top-right"]
+
+
+class CaptionPlacementIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    position: CaptionPosition = "bottom-left"
+    size: float = Field(default=1.0, ge=0.5, le=3)  # relative to the standard caption size
+
+
+class TextStyleIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    font: Literal["sans", "serif", "script", "mono"] = "sans"
+    color: str = Field(default="#ffffff", pattern=r"^#[0-9a-fA-F]{6}$")
+    box: bool = True
+
+
 class EditExportIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     rotation: int = Field(default=0, ge=-180, le=180)
@@ -117,6 +133,14 @@ class EditExportIn(BaseModel):
     label: str = Field(default="", max_length=120)
     format: Literal["png", "jpeg"] = "png"
     annotations: AnnotationsIn = AnnotationsIn()
+    text_style: TextStyleIn = TextStyleIn()
+    target_place: CaptionPlacementIn = CaptionPlacementIn()
+    label_place: CaptionPlacementIn = CaptionPlacementIn()
+
+
+class CurrentRunIn(BaseModel):
+    """Go back to an earlier result of the image."""
+    run_id: str = Field(min_length=1, max_length=80)
 
 
 class FramingIn(BaseModel):

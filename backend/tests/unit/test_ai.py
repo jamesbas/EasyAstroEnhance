@@ -285,6 +285,53 @@ def test_ai_sharpening_runs_its_models_and_discloses_them(models):
     assert np.abs(res.processed - plain.processed).max() < 1e-3 * float(np.abs(plain.processed).max())
 
 
+def test_ai_sharpening_only_sharpens_structure_above_the_noise_before_denoising(models, monkeypatch):
+    """Engine 1.7.1: areas that noise reduction made smooth — faint or bright — are not sharpened into grain; real fine
+    structure still is. The gate compares with the noise the data had before any noise reduction."""
+    from types import SimpleNamespace
+
+    from app.processing import pipeline as pl
+    from app.processing.ai import tools
+
+    monkeypatch.setattr(tools, "sharpen", lambda proc, *a, **k: (proc + 0.01, {}))  # a visible, uniform "sharpening"
+    rng = np.random.default_rng(1)
+    h, w, sig = 300, 200, 1e-3
+    signal = np.full((h, w, 3), 0.01, np.float32)
+    signal[40:100, 50:150] += 2 * sig  # faint and smooth
+    signal[120:180, 50:150] += 40 * sig  # bright and smooth
+    stripes = 40 * sig + 8 * sig * np.sign(np.sin(np.arange(100) * 2 * np.pi / 6))  # bright with fine structure
+    signal[200:260, 50:150] += stripes[None, :, None].astype(np.float32)
+    work = signal + rng.normal(0, sig, signal.shape).astype(np.float32)  # before noise reduction
+    proc = signal + rng.normal(0, sig / 5, signal.shape).astype(np.float32)  # after: five times smoother
+    ones = np.ones((h, w), bool)
+    sky = ones.copy()
+    sky[30:270, 40:160] = False
+    recipe = SimpleNamespace(ai=SimpleNamespace(sharpen_stars=0.0, sharpen_amount=1.0))
+    opts = ExecutionOptions(device="cpu", ai_models_dir=models)
+
+    def sharpened(ref):
+        res = pl._ai_sharpen(proc, ones, sky, None, ones, "linear", True, recipe, opts, lambda *a: None, lambda: None, ref)
+        assert res["status"] == "applied", res
+        change = (res["result"] - proc).mean(axis=2) / 0.01
+        # inside each patch, away from its edges (a step from the sky is real structure and is sharpened)
+        return [float(change[y0 + 15:y0 + 45, 65:135].mean()) for y0 in (40, 120, 200)], res["params"]
+
+    ref = pl.noise_before_denoise(work, sky, True)
+    (faint, flat, structured), params = sharpened(ref)
+    assert faint < 0.05 and flat < 0.05 and structured > 0.9
+    assert params["snr_gate_noise"] == pytest.approx(ref.pixel) and params["detail_gate"]["noise_before_denoise"] == pytest.approx(ref.detail)
+    assert 0 < params["share_sharpened"] < 0.3
+    (old_faint, old_flat, _), _ = sharpened(None)  # engine 1.7.0 measured only the denoised noise: everything was sharpened
+    assert old_faint > 0.95 and old_flat > 0.95
+
+    # Deringing: a model that digs dark pits cannot make a pixel darker than its neighbourhood was before sharpening.
+    monkeypatch.setattr(tools, "sharpen", lambda proc, *a, **k: (proc - 1.0, {}))
+    res = pl._ai_sharpen(proc, ones, sky, None, ones, "linear", True, recipe, opts, lambda *a: None, lambda: None, ref)
+    from scipy import ndimage
+
+    assert (res["result"] >= ndimage.minimum_filter(proc, size=(5, 5, 1)) - 1e-7).all()
+
+
 def test_ai_smoothing_does_not_drive_a_deeper_stretch(models, monkeypatch):
     """A model that flattens the sky completely must not make the stretch solver lift everything (engine 1.2 noise floor)."""
     import hashlib

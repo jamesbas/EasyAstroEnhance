@@ -1,0 +1,10 @@
+Fonts used for Edit export captions (SIL Open Font License 1.1; licence texts alongside).
+
+Lato-Regular.ttf        Lato (Łukasz Dziedzic)     github.com/google/fonts ofl/lato/Lato-Regular.ttf
+                        sha256 d636e4683231f931eda222d588e944d082bfd3bdba02f928bee461c0f185b251   OFL-Lato.txt
+PTSerif-Regular.ttf     PT Serif (ParaType)        github.com/google/fonts ofl/ptserif/PT_Serif-Web-Regular.ttf
+                        sha256 a4951fade06ff8f09b7673aa81ffb65a8cd409e24d3289a6dc670bc4dda2557a   OFL-PTSerif.txt
+GreatVibes-Regular.ttf  Great Vibes (TypeSETit)    github.com/google/fonts ofl/greatvibes/GreatVibes-Regular.ttf
+                        sha256 8d509802186f1b51572531ecf313e8098f9a5bfdfaca93f0c9b34467f9982d15   OFL-GreatVibes.txt
+SpaceMono-Regular.ttf   Space Mono (Colophon)      github.com/google/fonts ofl/spacemono/SpaceMono-Regular.ttf
+                        sha256 95837e182baeeada83368f7748db28357f0a1b75c6b84ff7065b5edf933c8e18   OFL-SpaceMono.txt

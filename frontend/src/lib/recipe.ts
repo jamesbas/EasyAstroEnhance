@@ -56,6 +56,7 @@ export const AUTO_STAGES: AutoStageSpec[] = [
   { key: 'star_stretch', label: 'Gentler stretch on stars', hint: 'Stretches confident star areas less so they stay compact (never removes or shrinks stars)' },
   { key: 'cosmetic', label: 'Repair hot and cold pixels', hint: 'Single colored hot pixels and dark pixels on the sky background, linear stacks only (stars are never touched)' },
   { key: 'halo_reduction', label: 'Reduce star color fringes', hint: 'Only when bright stars have a blue/violet ring clearly stronger than their surroundings' },
+  { key: 'banding', label: 'Repair row/column banding', hint: 'Only when the sky shows stripes clearly stronger than its noise, linear stacks only' },
 ];
 
 export interface NumericBound {

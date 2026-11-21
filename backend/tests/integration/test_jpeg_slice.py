@@ -160,6 +160,34 @@ def test_retention_keeps_the_newest_results_per_image(client, tmp_path):
     assert client.get(f"/api/v1/assets/{a['id']}").json()["latest_run"]["id"] == second
 
 
+def test_going_back_to_an_earlier_result_and_deleting_results(client, tmp_path):
+    arr, _ = synthetic_field(seed=23)
+    a = ready(client, upload(client, write_jpeg(tmp_path / "back.jpg", arr))["id"])
+    asset = lambda: client.get(f"/api/v1/assets/{a['id']}").json()  # noqa: E731
+    natural = run_job(client, [a["id"]], default_recipe(client, "natural"), key="back-run-01")["items"][0]["run_id"]
+    vivid = run_job(client, [a["id"]], default_recipe(client, "vivid"), key="back-run-02")["items"][0]["run_id"]
+    assert asset()["latest_run"]["id"] == vivid  # the newest result is current
+
+    # Go back: the earlier result becomes the one shown and downloaded; nothing is reprocessed or deleted.
+    r = client.put(f"/api/v1/assets/{a['id']}/current-run", json={"run_id": natural})
+    assert r.status_code == 200 and r.json()["latest_run"]["id"] == natural and r.json()["run_count"] == 2
+    assert client.put(f"/api/v1/assets/{a['id']}/current-run", json={"run_id": "run_nope"}).status_code == 404
+
+    # Enhancing again with identical settings reuses a result: the reused one becomes current.
+    item = run_job(client, [a["id"]], default_recipe(client, "vivid"), key="back-run-03")["items"][0]
+    assert item["run_id"] == vivid and asset()["latest_run"]["id"] == vivid
+
+    # Deleting the current result: the newest remaining one takes over; run numbers keep counting.
+    r = client.request("DELETE", f"/api/v1/runs/{vivid}")
+    assert r.status_code == 200 and r.json()["current_run_id"] == natural
+    assert not (client.cfg.runs_dir / vivid).exists() and client.get(f"/api/v1/runs/{vivid}").status_code == 404
+    assert asset()["latest_run"]["id"] == natural and asset()["run_count"] == 1
+    third = run_job(client, [a["id"]], default_recipe(client, "faint-detail"), key="back-run-04")["items"][0]["run_id"]
+    serials = sorted(x["serial"] for x in client.get("/api/v1/runs", params={"asset_id": a["id"]}).json()["runs"])
+    assert serials == [1, 3] and asset()["latest_run"]["id"] == third
+    assert client.request("DELETE", "/api/v1/runs/run_nope").status_code == 404
+
+
 def test_live_preview_is_exactly_what_enhance_publishes(client, tmp_path):
     arr, _ = synthetic_field(seed=24)
     a = ready(client, upload(client, write_jpeg(tmp_path / "live.jpg", arr))["id"])

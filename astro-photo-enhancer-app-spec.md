@@ -1,6 +1,23 @@
 # EasyAstroEnhance — Application Development Specification
 
-Version 1.8 • November 20, 2026 • Prepared for Jaime Basilico
+Version 1.12 • November 21, 2026 • Prepared for Jaime Basilico
+
+> **Amendment 1.12 (engine 1.7.1, recipe schema unchanged).** AI sharpening no longer turns smooth, denoised areas into
+> grain: its gate measures against the noise before any noise reduction, sharpens only fine structure that stands above
+> that noise, and never makes a pixel darker than its neighbourhood was. See §4 "Amendment 1.12".
+
+> **Amendment 1.11 (Edit export text and in-app help; no engine or recipe change).** **Edit export…** finds the image's
+> sky position by itself when annotations need it (no trip to Advanced); captions get a font (four bundled OFL fonts),
+> colour, optional dark box, and a position and size for the target name and the label separately; and a **Help**
+> button opens a short how-to guide. See §4 "Amendment 1.11".
+
+> **Amendment 1.10 (reversing steps; no engine or recipe change).** A user can take back what an enhancement did
+> without reprocessing from scratch: **Remove a step** turns off one applied step of the current result (each step with
+> its own switch or slider; the stretch and other core steps cannot be removed); **Undo / Redo** (also Ctrl+Z / Ctrl+Y)
+> step back through settings changes, kept separately for each image; **Reset to defaults** returns to the Auto preset
+> with every optional tool off; **Go back to this result** makes an earlier result the image's current one again; and
+> **Delete…** removes a result after confirmation. Live preview shows the reversed settings at once. Outputs are
+> unchanged, so `PIPELINE_VERSION` stays 1.7.0. See §4 "Amendment 1.10".
 
 > **Amendment 1.8 (engine 1.6.0, recipe schema 9; implemented).** One-button polish and four output fixes.
 > **Auto** becomes the default preset: it measures each image (bright core, faint extended signal, star density) and
@@ -508,6 +525,113 @@ and the disc unclipped with no star softening; a synthetic RAW AVI is read exact
 half and aligns it; a 4-panel synthetic mosaic covers every panel with chaining; the Seestar scan groups targets and
 reads names only.
 
+### Amendment 1.10 — reversing an enhancement step (no engine or recipe change)
+
+Users asked for a way to take back an enhancement step. Results stay immutable; reversing works on the settings (which
+create new results) and on which stored result is the image's current one. No processing output changes.
+
+- **Remove a step.** Under a finished result, **Remove a step:** lists every step the run applied (or reduced) that has
+  a switch or slider of its own, by the report's operation name, in the order it ran. Removing a step changes only the
+  setting that turns it off — a switch goes off, a strength goes to 0 (Noise reduction, Contrast, Detail, Color, Star
+  color, Fine sharpening, Hubble-style), Star brightness / Star size return to 100 %, Protect bright cores turns off
+  bright-core (HDR) compression, Object Color resets, and Accurate star colours / a user catalog is cleared. Following
+  the usual Auto rule, a Look or Advanced change switches the preset to Custom. Steps without their own setting (the
+  stretch, large-scale structure, Moon surface colour balance) are not offered. A step already off in the panel shows as
+  "(off)". Chips appear only for the image's current result and only while the image is not being processed; with Live
+  preview on the result without that step is shown at once and **Save this result** stores it as a new run.
+- **Undo / Redo.** Every settings change (sliders, switches, presets, Remove a step, Reset, Use these settings) is
+  recorded per image (the selected image's id), up to 100 steps; a slider drag counts as one step (changes within 0.7 s
+  merge). Ctrl/Cmd+Z undoes; Ctrl/Cmd+Shift+Z and Ctrl+Y redo — not while typing in a field or with a dialog open.
+  Settings themselves stay shared by all images, as before; Auto's per-image look choice is not an undo step.
+- **Reset to defaults** sets the built-in **Auto** recipe (all optional tools — AI, catalog colour, deconvolution,
+  layer exports — off). It can be undone.
+- **Current result.** Each image has a current result: the one chosen with **Go back to this result** in the result
+  list, otherwise the newest. It is the result shown, downloaded and live-previewed against; going back also loads that
+  run's settings into the panel. Re-enhancing with settings identical to an earlier run reuses that run and makes it
+  current. Run numbers are never reused after a deletion.
+- **Delete a result.** **Delete…** asks for confirmation, removes the run's record and files (never the original) and,
+  if it was current, the next newest result becomes current. Not allowed while the image is queued or processing, or while any ZIP
+  download is being built.
+- **Retention.** Automatic clean-up never deletes an image's current result.
+
+**API.** `PUT /assets/{id}/current-run` (`{run_id}`; 404 for another image's or an unknown run, 409 while the image is
+busy) returns the asset with its new current result as `latest_run` (field name kept for compatibility).
+`DELETE /runs/{id}` (409 while busy or zipping) returns `{deleted, current_run_id}`. The database gains
+`assets.current_run_id` and `assets.last_serial` (added to existing databases on start).
+
+**Fidelity.** Nothing new is computed and originals are untouched; removing a step only creates new settings, which are
+processed and reported like any others.
+
+**Tests.** Going back to an earlier result changes the asset's result and serial order; deleting the current result
+falls back to the newest; run numbers are not reused; busy images are refused. Browser tests remove a step, undo and
+redo it (buttons and keyboard), keep separate histories for two images, save the live preview, go back to an earlier
+result, delete a result after confirming, and reset to defaults then undo.
+
+### Amendment 1.11 — Edit export text, automatic sky position, in-app help (no engine or recipe change)
+
+A user could not get annotations to work: they need the image's sky position, which was found only from All controls →
+Advanced → Sky position or by Accurate star colours, and nothing in Edit export said so clearly.
+
+- **Automatic sky position.** `POST /runs/{id}/edit-export/objects` returns `solve_needed: true` when no solution is
+  stored for the image, the star catalog is installed and the image is ready. The dialog then calls
+  `POST /assets/{id}/sky-solution` once (header WCS check, else a hinted solve from the header's pointing; a few seconds,
+  shown as "Finding where this image points on the sky…") and refreshes the annotation options. A failed attempt is
+  stored with the image like any solution and not retried; its reason is shown with the remedy (type the target's name
+  under Advanced → Sky position). Without the star catalog the reason says to download it. Nothing in the image changes.
+- **Caption style.** `EditExportIn` gains `text_style` (`font`: sans / serif / script / mono; `color` `#rrggbb`; `box`)
+  and `target_place` / `label_place` (`position`: bottom-left / bottom-center / bottom-right / top-left / top-center /
+  top-right; `size` 0.5–3 × the standard height of 4.5 % of the short edge). Captions sharing a position are stacked
+  (target name first) and aligned to that side; a block shrinks as a whole until it fits, else `CAPTION_TOO_LARGE`.
+  With the box, the text sits on the background darkened to 35 % (as before); without it, the text gets a dark outline
+  (1/14 of its size). Blocks move clear of the compass and scale bar (the annotation overlay reports their areas) and
+  of each other. The settings are recorded in the file's edit metadata. The label text and style are remembered in the
+  browser for the next export; the target name is not.
+- **Fonts.** Lato, PT Serif, Great Vibes and Space Mono (SIL Open Font License 1.1, unmodified) ship in
+  `backend/app/fonts` with their licences and SHA-256 (`SOURCES.txt`). Pillow's built-in font lacked accented letters
+  (é, ñ), ×, — and ′, so names such as "José" printed boxes; captions no longer use it, and the scale bar prints
+  arcminutes as `'`.
+- **Help.** A **Help** button in the top bar opens a how-to guide with short sections (quick start, changing the look,
+  taking a step back, Seestar import and stacking, sky position / star colours / annotations, Edit export, AI tools,
+  troubleshooting) and a link to the full guide on the project site.
+
+**Tests.** Captions land at each of the six positions, take the chosen colour, box or outline and size, keep clear of
+reserved areas, and refuse text that cannot fit; every caption font has accented letters; the edit-export API records
+the style and rejects invalid colours and positions; the objects endpoint asks for a solve only once the star catalog is
+installed and reports a stored failure with its remedy. Browser tests choose a font, colour, box, positions and sizes,
+check that the label and style are remembered, and open Help. Checked on the real M 101 stack (2491 frames, header
+pointing but no WCS): the dialog found the position by itself and drew 16 objects, the compass and the scale bar with
+styled text.
+
+### Amendment 1.12 — AI sharpening without grain (engine 1.7.1, recipe schema unchanged)
+
+A user saw blotchy, speckled texture after zooming into IC 434 and M 101 enhanced with every AI tool on (AI sharpening
+70–80 %). One setting at a time showed AI sharpening as the cause (Detail, classical or AI noise reduction made no
+difference). Its gate compared brightness with the sky noise measured *after* noise reduction: AI noise reduction made
+the sky about 2× cleaner per pixel, so faint nebula and galaxy glow counted as strong signal; and brightness alone cannot
+tell a smooth bright area from detail — in IC 434's bright, smooth band the models added fine texture 4× the original
+noise in that band (the denoised data had 0.6×). M 101's dust lanes also became strings of dark dots.
+
+- **Noise reference.** Before AI sharpening, the luminance noise of the data before any noise reduction is measured
+  (after cosmetic and banding repair): per pixel (σ 24 px Gaussian background removed, sigma-clipped) and in the 1–3 px
+  band the models sharpen (difference of Gaussians σ 1 / 3, sigma-clipped).
+- **Brightness gate.** As before (3 → 10 σ), but σ is the larger of the noise after and before noise reduction.
+- **Detail gate.** The local RMS of the denoised luminance in the 1–3 px band (Gaussian σ 2 px) divided by the band
+  noise before noise reduction: sharpening starts at 1.5× and is full from 4× (smoothstep, then a σ 1 px blur). The two
+  gates multiply. Smooth areas, faint or bright, are left as noise reduction made them.
+- **Deringing.** No sharpened pixel (per channel) may be darker than the darkest pixel of its 5 × 5 neighbourhood before
+  sharpening — the same principle as the classical deconvolution's deringing. Peaks are not limited.
+- **Report.** `snr_gate_noise`, `noise_before_denoise`, `detail_gate` (band, noise, thresholds), `share_sharpened` (mean
+  gate over valid pixels) and `deringing`.
+- Calibrated on the user's IC 434 (386 × 10 s, LP) and M 101 (2491 frames) stacks with their settings: the nebula band
+  and galaxy glow are as smooth as without sharpening, the Horsehead's edge, spiral arms, core and stars are still
+  sharpened (about 2 % of each frame), and the dark dots are gone. A lower threshold (1.0×) left speckle along the
+  Horsehead's edge; a higher one (2.0×) removed nearly all sharpening of real structure.
+
+**Fidelity.** Sharpening remains learned processing, disclosed as before; the change only restricts where it applies.
+**Tests.** A synthetic stack denoised 5×: faint and bright smooth areas are not sharpened, a bright striped area is
+fully sharpened, the engine 1.7.0 gate (no reference) sharpened all three, and a model that digs pits cannot go below
+the 5 × 5 neighbourhood minimum.
+
 ### Deferred
 
 Arbitrary cubes and multi-page stacks; ~~plate solving~~ blind (hint-free) plate solving *(amended 1.7: hinted solving
@@ -839,6 +963,9 @@ All endpoints below are local, versioned `/api/v1`. Use generated IDs rather tha
 | GET `/assets/{id}/live-preview/{live_id}` | *(1.8)* The live preview image (enhanced or fixed-mapping variant, optional ROI) |
 | POST `/assets/{id}/preset-previews` | *(1.8)* Reduced-size quick-look thumbnails for up to 16 recipes |
 | POST `/stacks/browse` | *(1.8)* Read-only folder listing for stacking (subfolders, FITS counts, recent folders) |
+| PUT `/assets/{id}/current-run` | *(1.10)* Make one of the image's results its current result again |
+| DELETE `/runs/{id}` | *(1.10)* Delete a result (app-owned run data only); the next newest becomes current if needed |
+| POST `/runs/{id}/edit-export` | *(1.6; 1.11)* The framed sharing copy; *(1.11)* `text_style`, `target_place`, `label_place` |
 
 Poll active jobs approximately once per second; back off in background tabs. No WebSocket is needed initially. Recipe changes create new runs. Immutable recipe snapshots avoid races when controls change during processing. Retries should be idempotent using a client request key; repeat button clicks must not duplicate expensive work. Cache keys include source hash, engine/dependency version, canonical recipe and per-file masks.
 

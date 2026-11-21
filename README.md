@@ -159,7 +159,7 @@ frontend/ (React + TypeScript + Vite)         backend/app/
 * On the CPU, the pixel stages run on parallel tiles whose overlap covers every chained filter, so the result is
   bit-for-bit the same as one full-frame pass; independent analysis steps also run in parallel.
 
-### Processing method disclosure (engine 1.7.0, recipe schema 10 — one-button Enhance)
+### Processing method disclosure (engine 1.7.1, recipe schema 10 — one-button Enhance)
 
 Press **Enhance**. The default preset, **Auto**, measures each image (a bright extended core, faint extended signal,
 star density) on a small binned copy and applies one of the built-in looks — Moon & planets, Bright core (HDR), Faint
@@ -170,7 +170,12 @@ Star field, Moon & planets, Seestar match) or click **Preview presets on this im
 color** and a *Protect bright cores* switch plus the tools below. Moving a Look slider makes the settings your own
 (Custom). After a first result, changed settings are shown as a **Live preview (not saved)** in the viewer; **Save this
 result** stores exactly that preview as a new run, and **Use these settings** in the result history brings back the
-settings of an earlier result. Everything else is measured from the image and recorded. The method follows the free tools Seestar owners
+settings of an earlier result. To take something back: **Remove a step** under a result turns off one step it applied
+(for example *Detail enhanced* or *Stars kept small*; the stretch itself can't be removed) and live-previews the result
+without it; **Undo / Redo** (Ctrl+Z / Ctrl+Y) step through settings changes, kept separately for each image; **Reset to
+defaults** returns to Auto with every optional tool off; **Go back to this result** in the result list makes an earlier
+result the one shown and downloaded again; and **Delete…** removes a result after you confirm (never the original).
+Everything else is measured from the image and recorded. The method follows the free tools Seestar owners
 use (Siril, GraXpert's classical background tools, VeraLux HyperMetric Stretch, AstroWizard), using only their
 classical algorithms — see [improve-enhance.md](improve-enhance.md). No 8-bit conversion exists for TIFF/FITS.
 
@@ -239,7 +244,8 @@ opening any of them. Saved presets from recipe schemas 3–5 migrate with newly 
 * **Sky position** (All controls → Advanced → Sky position, or under Star colour): click **Find on the sky** to check the
   FITS file's own sky coordinates (WCS) against catalog stars, or work them out from the header's pointing and pixel
   scale (a typed object name such as *M 31* also works). Needs the star catalog (Settings → **Reference data**, one
-  download). Offline: no plate-solving service or external program. Seestar stacks solve in a few seconds.
+  download). Offline: no plate-solving service or external program. Seestar stacks solve in a few seconds. You rarely
+  need this button: Accurate star colours and Edit export's annotations find the position by themselves when needed.
 * **Accurate star colours** (Star colour): one switch for linear broadband RGB FITS. The colour balance is fitted to the
   Gaia-measured colours of the stars in the frame (through the sky position, found automatically when needed) instead
   of assuming the average star is white. Relative colour calibration through a generic RGB passband model, not
@@ -303,8 +309,11 @@ Under **AI tools** in the Enhancement panel, four switches are all off by defaul
   and linear FITS files (made when first downloaded; starless + stars equals the processed-linear data). Large or
   saturated stars may remain partly in the starless layer. They are never part of Download all by default.
 * **AI sharpening:** sharpens fine structure and tightens stars blurred by seeing and focus; the strength slider sets
-  galaxy/nebula sharpening and Advanced → *AI star sharpening* sets the stars. It is gated so the sky noise is not
-  sharpened and saturated star cores pass through; the report gives the sky noise before and after. The models'
+  galaxy/nebula sharpening and Advanced → *AI star sharpening* sets the stars. Only fine detail that stands out from
+  the noise the stack had *before* noise reduction is sharpened, so smooth areas — faint nebula, a galaxy's glow, the
+  sky — stay smooth instead of turning into grain (engine 1.7.1), and no pixel becomes darker than its neighbourhood
+  was (no dark pits along dust lanes or rings around stars). Saturated star cores pass through. The report gives the
+  share of the image sharpened and the sky noise before and after. The models'
   super-resolution variants are never used.
 * **Stretch safeguard:** AI denoised data are treated as at most 2× cleaner when the stretch is chosen. Without this,
   the solver over-stretched and amplified colour mottle.
@@ -390,14 +399,20 @@ black corners; zoom in to crop them. Zoom does not enlarge the exported pixels. 
 field rotation or mosaics), **Crop stacking edges** frames the largest clean area at the image's aspect ratio; it is
 only a suggestion and nothing is cropped unless you click it.
 
-**Annotations** (when the image's sky position is known — see *Sky position* above): **Label objects** draws the
+**Annotations**: when the image's sky position isn't known yet, the dialog finds it by itself as it opens (a few
+seconds; needs the star catalog from Settings → Reference data). If it can't be found — for example a JPEG without
+coordinates — the reason is shown and you can type the target's name under *Sky position* above. **Label objects** draws the
 galaxies, nebulae and clusters of the OpenNGC catalog inside the framing (untick any you don't want; needs the object
 catalog from Settings → Reference data), **Compass** shows north and east, and **Scale bar** shows the angular scale.
 They are drawn only on this sharing copy.
 
 Enter optional **Label text** for a name, company or caption. **Include target name** fills in the FITS `OBJECT`
-name when available, or lets you enter one manually. The text is imprinted in the lower-left corner of the new
-image. Choose **PNG (16-bit)** or **JPEG (for sharing)**. This creates a separate copy of the enhanced display, not a
+name when available, or lets you enter one manually. **Text style** chooses the font (Sans, Serif, Script or
+Typewriter — open-licence fonts shipped with the app, with accented letters), the text colour and whether a dark box
+sits behind the text (without it the text gets a thin dark outline), plus a **position** (four corners, top or bottom
+centre) and **size** for the target name and the label separately. Texts at the same position are stacked, target name
+first, and move clear of the compass and scale bar. The label text and style are remembered for your next export.
+Choose **PNG (16-bit)** or **JPEG (for sharing)**. This creates a separate copy of the enhanced display, not a
 new enhancement run. The file records the source result and edit settings, but doesn't copy the original header.
 Your regular downloads, original file, and processed-linear FITS or TIFF stay unchanged.
 

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, fullMetadataFitsUrl, readableError } from '../api/client';
-import type { BatchIncludeKind, CleanFrame, Run } from '../api/types';
+import type { Asset, BatchIncludeKind, CleanFrame, Run } from '../api/types';
 import { formatBytes } from '../lib/format';
 import { EditExportDialog } from './EditExportDialog';
 
@@ -9,6 +9,7 @@ interface ExportMenuProps {
   batchRunIds: string[];
   onError: (err: unknown) => void;
   cleanFrame?: CleanFrame | null;
+  onAssetUpdated?: (a: Asset) => void;
 }
 
 const EXTRA_KINDS: { kind: BatchIncludeKind; label: string }[] = [
@@ -33,7 +34,7 @@ function triggerDownload(url: string): void {
   a.remove();
 }
 
-export function ExportMenu({ run, batchRunIds, onError, cleanFrame }: ExportMenuProps) {
+export function ExportMenu({ run, batchRunIds, onError, cleanFrame, onAssetUpdated }: ExportMenuProps) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [include, setInclude] = useState<BatchIncludeKind[]>([]);
@@ -110,7 +111,8 @@ export function ExportMenu({ run, batchRunIds, onError, cleanFrame }: ExportMenu
         <button type="button" className="btn primary" disabled data-testid="download-png">Download PNG</button>
       )}
       <button type="button" className="btn" disabled={!run} onClick={() => setEditing(true)}>Edit export…</button>
-      {editing && run && <EditExportDialog key={run.id} runId={run.id} cleanFrame={cleanFrame ?? null} onClose={() => setEditing(false)} />}
+      {editing && run && <EditExportDialog key={run.id} runId={run.id} assetId={run.asset_id} cleanFrame={cleanFrame ?? null}
+        onAssetUpdated={onAssetUpdated} onClose={() => setEditing(false)} />}
       <div className="menu-wrap">
         <button type="button" className="btn" disabled={!run} aria-haspopup="true" aria-expanded={open} onClick={() => setOpen((o) => !o)} data-testid="more-formats">
           More formats ▾

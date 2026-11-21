@@ -11,12 +11,13 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, Response
 
 from ..models.api import BatchExportIn, ConfirmIn, EditExportIn, FramingIn
-from ..processing.edit_export import Framing, render_edited
+from ..processing.edit_export import Caption, Framing, TextStyle, render_edited
 from ..processing.export import _clean_header
 from ..processing.imagedata import ProcessingError
 from ..processing.recipe import PIPELINE_VERSION
 from ..services import previews
 from ..services.exports import ALLOWED_KINDS, DOWNLOADABLE_KINDS, cancel_batch, ensure_export, start_batch
+from ..services.results import current_run, delete_run
 from .common import ApiError, cfg_of, coord_of, db_of, serialize_run
 
 router = APIRouter(tags=["runs"])
@@ -52,6 +53,21 @@ def get_run(request: Request, run_id: str) -> dict[str, Any]:
         applied["operations"] = full["applied"]["operations"]
     has_fixed = (cfg_of(request).runs_dir / run_id / "display_fixed.npy").exists()
     return {**serialize_run(r), "applied": applied, "has_fixed_mapping": has_fixed}
+
+
+@router.delete("/runs/{run_id}")
+def delete_result(request: Request, run_id: str) -> dict[str, Any]:
+    """Delete one result (its images, exports and report). The original and the image's other results are kept; if this
+    was the current result, the newest remaining one becomes current."""
+    db, cfg = db_of(request), cfg_of(request)
+    run = _run(request, run_id)
+    if db.one("SELECT 1 AS x FROM job_items WHERE asset_id=? AND state IN ('queued','running')", (run["asset_id"],)):
+        raise ApiError(409, "ASSET_BUSY", "This image is being enhanced. Wait until it finishes, then try again.")
+    if db.one("SELECT 1 AS x FROM exports WHERE state='building'"):
+        raise ApiError(409, "EXPORT_BUILDING", "A ZIP download is being prepared. Wait until it is ready, then try again.")
+    delete_run(cfg, db, run)
+    cur = current_run(db, run["asset_id"])
+    return {"deleted": run_id, "current_run_id": cur["id"] if cur else None}
 
 
 @router.get("/runs/{run_id}/preview")
@@ -162,8 +178,10 @@ async def edit_export_target(request: Request, run_id: str):
     return {"target": target}
 
 
-def _annotation_context(request: Request, run_id: str) -> tuple[dict[str, Any] | None, tuple, str | None, str | None]:
-    """(sky solution, deep-sky objects, objects catalog SHA-256, reason when unavailable) for a run's image."""
+def _annotation_context(request: Request, run_id: str) -> tuple[dict[str, Any] | None, tuple, str | None, str | None, bool]:
+    """(sky solution, deep-sky objects, objects catalog SHA-256, reason when unavailable, whether the client should find
+    the sky position now) for a run's image. Edit export finds a missing position by itself (POST /assets/{id}/sky-solution)
+    so the user never has to look for it in Advanced."""
     from ..processing.catalogs import objects as dso
     from ..processing.catalogs import registry as refreg
     from ..services.worker import load_sky_solution
@@ -172,16 +190,24 @@ def _annotation_context(request: Request, run_id: str) -> tuple[dict[str, Any] |
     run = _run(request, run_id)
     asset = db_of(request).one("SELECT * FROM assets WHERE id=?", (run["asset_id"],))
     if not asset:
-        return None, (), None, "This result's original is no longer available."
+        return None, (), None, "This result's original is no longer available.", False
     sol = load_sky_solution(cfg, asset)
-    if not sol or sol.get("status") not in ("verified", "solved"):
-        reason = (sol or {}).get("reason") or "Find where this image points on the sky first (All controls → Advanced → Sky position)."
-        return None, (), None, reason
+    if not sol:
+        if refreg.installed(cfg.reference_data_dir, "stars-gaia-dr3") is None:
+            return None, (), None, ("Annotations need the star catalog: download it in Settings → Reference data. The app then "
+                                    "finds where the image points on the sky by itself."), False
+        if asset["status"] != "ready":
+            return None, (), None, "This image can't be checked against the sky.", False
+        return None, (), None, "Finding where this image points on the sky…", True
+    if sol.get("status") not in ("verified", "solved"):
+        why = sol.get("reason") or "The stars could not be matched to the catalog."
+        return None, (), None, (f"The app couldn't find where this image points on the sky: {why} You can try again with the "
+                                "target's name in All controls → Advanced → Sky position."), False
     if not refreg.group_ready(cfg.reference_data_dir, "objects"):
-        return sol, (), None, "Download the deep-sky object catalog in Settings → Reference data to label objects."
+        return sol, (), None, "Download the deep-sky object catalog in Settings → Reference data to label objects.", False
     paths = tuple(str(refreg.installed(cfg.reference_data_dir, k)) for k in refreg.GROUPS["objects"])
     digest = ",".join(refreg.DATA[k].sha256 for k in refreg.GROUPS["objects"])
-    return sol, dso.objects_from(paths), digest, None
+    return sol, dso.objects_from(paths), digest, None, False
 
 
 @router.post("/runs/{run_id}/edit-export/objects")
@@ -189,13 +215,13 @@ async def edit_export_objects(request: Request, run_id: str, body: FramingIn) ->
     """Catalogued objects inside the framed area, for the annotation checklist."""
     from ..processing.annotate import frame_geometry, objects_in_frame
 
-    sol, objs, _, reason = _annotation_context(request, run_id)
+    sol, objs, _, reason, solve = _annotation_context(request, run_id)
     if sol is None:
-        return {"available": False, "compass_available": False, "reason": reason, "objects": []}
+        return {"available": False, "compass_available": False, "reason": reason, "solve_needed": solve, "objects": []}
     geo = frame_geometry(sol["height"], sol["width"], Framing(body.rotation, body.zoom, body.pan_x, body.pan_y))
     found = await run_in_threadpool(objects_in_frame, sol, objs, geo, body.max_mag) if objs else []
     return {
-        "available": bool(objs), "compass_available": True, "reason": reason,
+        "available": bool(objs), "compass_available": True, "reason": reason, "solve_needed": False,
         "sky_solution": {k: sol.get(k) for k in ("status", "source", "center", "scale_arcsec")},
         "objects": [{k: o[k] for k in ("name", "type", "common", "mag", "major_arcmin")} for o in found],
     }
@@ -209,14 +235,17 @@ async def edit_export(request: Request, run_id: str, body: EditExportIn, preview
     path = cfg_of(request).runs_dir / run_id / "display.npy"
     frame = Framing(body.rotation, body.zoom, body.pan_x, body.pan_y)
     target, label = _label_text(body.target), _label_text(body.label)
-    lines = [text for text in (target, label) if text]
+    captions = [Caption(target, body.target_place.position, body.target_place.size),
+                Caption(label, body.label_place.position, body.label_place.size)]
+    hex_color = body.text_style.color
+    style = TextStyle(body.text_style.font, tuple(int(hex_color[i:i + 2], 16) for i in (1, 3, 5)), body.text_style.box)
     jpeg = body.format == "jpeg"
     ann = Annotations(objects=body.annotations.objects, hidden=tuple(body.annotations.hidden), max_mag=body.annotations.max_mag,
                       compass=body.annotations.compass, scale_bar=body.annotations.scale_bar)
     overlay = None
     objects_sha = None
     if ann.any:
-        sol, objs, objects_sha, reason = _annotation_context(request, run_id)
+        sol, objs, objects_sha, reason, _ = _annotation_context(request, run_id)
         if sol is None or (ann.objects and not objs):
             raise ApiError(422, "ANNOTATIONS_UNAVAILABLE", reason or "Annotations are not available for this image.")
 
@@ -234,7 +263,8 @@ async def edit_export(request: Request, run_id: str, body: EditExportIn, preview
         return json.dumps(meta, ensure_ascii=True).encode("ascii")
 
     def render() -> bytes:
-        return render_edited(previews.open_display(path), frame, lines, jpeg=jpeg, metadata=metadata, preview=preview, overlay=overlay)
+        return render_edited(previews.open_display(path), frame, captions, jpeg=jpeg, metadata=metadata, preview=preview,
+                             overlay=overlay, style=style)
 
     try:
         data = await run_in_threadpool(render)

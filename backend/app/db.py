@@ -13,7 +13,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS assets (
   id TEXT PRIMARY KEY, created_at TEXT NOT NULL, filename TEXT NOT NULL, format TEXT, size_bytes INTEGER,
   sha256 TEXT, status TEXT NOT NULL, error TEXT, inspection TEXT, interpretation TEXT NOT NULL DEFAULT '{}',
-  regions TEXT NOT NULL DEFAULT '[]', background TEXT, prepared TEXT, original_name TEXT
+  regions TEXT NOT NULL DEFAULT '[]', background TEXT, prepared TEXT, original_name TEXT, current_run_id TEXT,
+  last_serial INTEGER
 );
 CREATE TABLE IF NOT EXISTS presets (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, recipe TEXT NOT NULL, schema_version INTEGER NOT NULL,
@@ -74,6 +75,15 @@ class Database:
         self._conn.execute("PRAGMA foreign_keys=ON")
         with self._lock:
             self._conn.executescript(SCHEMA)
+            self._migrate()
+
+    def _migrate(self) -> None:
+        """Additive column migrations for databases created by earlier versions."""
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(assets)").fetchall()}
+        if "current_run_id" not in cols:  # the result shown, downloaded and zipped for the image (None: the newest)
+            self._conn.execute("ALTER TABLE assets ADD COLUMN current_run_id TEXT")
+        if "last_serial" not in cols:  # highest run number given out for the image (numbers are never reused)
+            self._conn.execute("ALTER TABLE assets ADD COLUMN last_serial INTEGER")
 
     @staticmethod
     def _dump(v: Any) -> Any:

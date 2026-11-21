@@ -1000,7 +1000,8 @@ def prepare_linear_stage(image: ImageData, recipe: Recipe, ctx: AssetContext, op
             proc, A.denoise, proc_changed = out_a2["proc"], classical_dn, True
         ai["ai_denoise"] = res
     if recipe.ai.sharpen and not is_noop:
-        res = _ai_sharpen(proc, weight, stat_w, star_hard, image.valid_mask, mode, rgb, recipe, opts, progress, check)
+        ref = timings.run("noise before denoise", "cpu", lambda: noise_before_denoise(work, stat_w, rgb))
+        res = _ai_sharpen(proc, weight, stat_w, star_hard, image.valid_mask, mode, rgb, recipe, opts, progress, check, ref)
         if res["status"] == "applied":
             proc, proc_changed = res.pop("result"), True
         ai["ai_sharpen"] = res
@@ -1908,12 +1909,44 @@ def _star_catalog(opts: ExecutionOptions) -> Path | None:
 
 
 SHARPEN_SNR_START, SHARPEN_SNR_RAMP = 3.0, 7.0  # the same SNR gate as deconvolution: no sharpening of sky noise
+NOISE_REF_SMOOTH_PX = 24.0  # gradients and nebulosity wider than this are removed before measuring pixel noise
+# Fine structure the models sharpen: a 1–3 px band. Sharpening is kept only where the (denoised) image has structure in
+# this band above what the original noise alone produced there: from DETAIL_GATE_START times that noise, fully from
+# START + RAMP. Smooth areas — where noise reduction left only residual mottle — are not sharpened into grain.
+DETAIL_BAND_PX = (1.0, 3.0)
+DETAIL_GATE_START, DETAIL_GATE_RAMP = 1.5, 2.5
+# Deringing: no sharpened pixel may be darker than the darkest pixel of its neighbourhood before sharpening (dark pits
+# along dust lanes, dark rings around stars), as the classical deconvolution's deringing.
+DERING_PX = 5
+
+
+def _detail_band(L: np.ndarray) -> np.ndarray:
+    return ndimage.gaussian_filter(L, DETAIL_BAND_PX[0]) - ndimage.gaussian_filter(L, DETAIL_BAND_PX[1])
+
+
+@dataclass(frozen=True)
+class NoiseRef:
+    """Luminance noise of the data before any noise reduction: per pixel, and in the fine-structure band."""
+    pixel: float
+    detail: float
+
+
+def noise_before_denoise(work: np.ndarray, stat_w: np.ndarray, rgb: bool) -> NoiseRef:
+    L = luminance(np, work) if rgb else work
+    L = np.where(np.isfinite(L), L, 0.0).astype(np.float32)
+    pixel = lp.clipped_stats((L - ndimage.gaussian_filter(L, NOISE_REF_SMOOTH_PX))[stat_w])[1]
+    return NoiseRef(float(pixel), float(lp.clipped_stats(_detail_band(L)[stat_w])[1]))
 
 
 def _ai_sharpen(proc: np.ndarray, weight: np.ndarray, stat_w: np.ndarray, star_hard: np.ndarray | None, valid: np.ndarray,
-                mode: str, rgb: bool, recipe: Recipe, opts: ExecutionOptions, progress, check) -> dict[str, Any]:
+                mode: str, rgb: bool, recipe: Recipe, opts: ExecutionOptions, progress, check,
+                ref: NoiseRef | None = None) -> dict[str, Any]:
     """Cosmic Clarity Sharpen on the (denoised) data, blended in by strength and by an SNR gate; saturated cores pass
-    through. Linear stacks: inside the processed-linear stage, so the processed FITS carries the sharpened values."""
+    through. Linear stacks: inside the processed-linear stage, so the processed FITS carries the sharpened values.
+
+    With ``ref`` (the noise before any noise reduction; engine 1.7.1) the gate measures brightness against that noise when
+    it is larger, and keeps sharpening only where fine structure rises above it: denoising flattens areas without adding
+    signal, and the models would otherwise turn their residual mottle into grain."""
     from .ai.tools import cc_radius_models
     from .ai.tools import sharpen as cc_sharpen
     from .stacking.quality import measure
@@ -1940,11 +1973,18 @@ def _ai_sharpen(proc: np.ndarray, weight: np.ndarray, stat_w: np.ndarray, star_h
         raise
     except Exception as exc:
         return {"status": "skipped", "reason": f"The AI sharpening models could not run ({type(exc).__name__}: {str(exc)[:160]}); nothing was sharpened."}
-    snr = (L - sky_l) / max(sig_before, STAT_FLOOR)
+    sig_gate = max(sig_before, ref.pixel if ref else 0.0)
+    snr = (L - sky_l) / max(sig_gate, STAT_FLOOR)
     gate = smoothstep(np, (snr - SHARPEN_SNR_START) / SHARPEN_SNR_RAMP) * weight
+    if ref is not None:
+        structure = np.sqrt(ndimage.gaussian_filter(_detail_band(L.astype(np.float32)) ** 2, 2.0)) / max(ref.detail, STAT_FLOOR)
+        gate = gate * ndimage.gaussian_filter(smoothstep(np, (structure - DETAIL_GATE_START) / DETAIL_GATE_RAMP).astype(np.float32), 1.0)
+        del structure
     saturated = ndimage.binary_dilation((proc >= lp.SATURATION_LEVEL).any(axis=2) if rgb else proc >= lp.SATURATION_LEVEL, iterations=2)
     gate = np.where(saturated, 0.0, gate).astype(np.float32)
     out = proc + (gate[..., None] if rgb else gate) * (sharp - proc)
+    if ref is not None:
+        out = np.maximum(out, ndimage.minimum_filter(proc, size=(DERING_PX, DERING_PX, 1) if rgb else DERING_PX))
     L2 = luminance(np, out) if rgb else out
     _, sig_after = lp.clipped_stats(L2[stat_w])
     run_label = (stellar or next(iter(nonstellar.values())))
@@ -1954,6 +1994,11 @@ def _ai_sharpen(proc: np.ndarray, weight: np.ndarray, stat_w: np.ndarray, star_h
         models=[ai_registry.MODELS[k].file for k in ([ids[0]] if stellar else []) + [f"sharpen-nonstellar-{r}" for r in sorted({rlo, rhi})]],
         median_star_fwhm_px=fwhm, snr_gate_sigmas=[SHARPEN_SNR_START, SHARPEN_SNR_START + SHARPEN_SNR_RAMP],
         saturated_cores="passed through unchanged", sky_noise_before=float(sig_before), sky_noise_after=float(sig_after),
+        snr_gate_noise=float(sig_gate), noise_before_denoise=None if ref is None else ref.pixel,
+        detail_gate=None if ref is None else {"band_px": list(DETAIL_BAND_PX), "noise_before_denoise": ref.detail,
+                                              "times_noise": [DETAIL_GATE_START, DETAIL_GATE_START + DETAIL_GATE_RAMP]},
+        share_sharpened=float(gate[valid].mean()) if valid.any() else 0.0,
+        deringing=None if ref is None else f"no pixel darker than the darkest of its {DERING_PX} × {DERING_PX} neighbours before sharpening",
         domain="processed-linear (exported)" if mode == "linear" else "rendered image",
         note="A sharper appearance is not additional measured resolution.",
     )

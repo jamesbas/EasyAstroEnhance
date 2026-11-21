@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react';
 import { api } from '../api/client';
 import type { Run, RunDetail } from '../api/types';
 
-// Run history for one asset; refetched whenever the asset's newest run changes (or a re-run is added).
-export function useRunHistory(assetId: string | null, latestRunId: string | null): Run[] {
+// Run history for one asset; refetched whenever the asset's current run changes, a re-run is added or ``version`` changes
+// (for example after a result was deleted).
+export function useRunHistory(assetId: string | null, latestRunId: string | null, version = 0): Run[] {
   const [state, setState] = useState<{ assetId: string | null; runs: Run[] }>({ assetId: null, runs: [] });
 
   useEffect(() => {
@@ -18,7 +19,7 @@ export function useRunHistory(assetId: string | null, latestRunId: string | null
     return () => {
       cancelled = true;
     };
-  }, [assetId, latestRunId]);
+  }, [assetId, latestRunId, version]);
 
   return state.assetId === assetId ? state.runs : [];
 }

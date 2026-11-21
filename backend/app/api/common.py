@@ -10,6 +10,7 @@ from ..config import Config
 from ..db import Database
 from ..processing.readers import evaluate_intake
 from ..services.queue import Coordinator, TaskError
+from ..services.results import current_run
 
 
 class ApiError(HTTPException):
@@ -126,7 +127,7 @@ def serialize_asset(db: Database, coord: Coordinator, cfg: Config, a: dict[str, 
     item = db.one(
         "SELECT i.* FROM job_items i JOIN jobs j ON j.id=i.job_id WHERE i.asset_id=? ORDER BY j.created_at DESC, i.position DESC LIMIT 1", (a["id"],)
     )
-    run = db.one("SELECT * FROM runs WHERE asset_id=? ORDER BY created_at DESC LIMIT 1", (a["id"],))
+    run = current_run(db, a["id"])
     stk = db.one("SELECT id, name, report FROM stacks WHERE asset_id=?", (a["id"],))
     stack_info = None
     if stk and stk.get("report"):
@@ -177,7 +178,7 @@ def serialize_asset(db: Database, coord: Coordinator, cfg: Config, a: dict[str, 
         "thumb_url": f"/api/v1/assets/{a['id']}/thumb" if prepared.get("label") else None,
         "preview_url": f"/api/v1/assets/{a['id']}/preview" if prepared.get("label") else None,
         "latest_item": serialize_item(db, coord, item) if item else None,
-        "latest_run": serialize_run(run) if run else None,
+        "latest_run": serialize_run(run) if run else None,  # the current result (newest unless the user went back)
         "run_count": db.one("SELECT COUNT(*) AS n FROM runs WHERE asset_id=?", (a["id"],))["n"],
         "stack": stack_info,
         "sky_solution": sky_solution_summary(cfg, a),

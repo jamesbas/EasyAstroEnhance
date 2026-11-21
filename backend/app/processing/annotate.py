@@ -170,7 +170,7 @@ def draw(image: np.ndarray, solution: dict[str, Any], objects: tuple[DeepSkyObje
     obj_mask = Image.new("L", (w, h))
     guide_mask = Image.new("L", (w, h))
     od, gd = ImageDraw.Draw(obj_mask), ImageDraw.Draw(guide_mask)
-    drawn: dict[str, Any] = {"objects": [], "compass": False, "scale_bar": None}
+    drawn: dict[str, Any] = {"objects": [], "compass": False, "scale_bar": None, "reserved": []}
     if ann.objects:
         placed: list[tuple[float, float, float, float]] = []
         for o in objects_in_frame(solution, objects, geo, ann.max_mag):
@@ -216,6 +216,8 @@ def draw(image: np.ndarray, solution: dict[str, Any], objects: tuple[DeepSkyObje
                 gd.line([(ex, ey), (hx, hy)], fill=255, width=lw + 1)
             gd.text((ex + vec[1] * fsize * 0.5 - fsize * 0.3, ey + vec[0] * fsize * 0.5 - fsize * 0.6), letter, font=font, fill=255)
         drawn["compass"] = True
+        reach = length + fsize * 1.2
+        drawn["reserved"].append((cx - reach, cy - reach, cx + reach, cy + reach))
     if ann.scale_bar:
         px_per_arcmin = 60.0 / solution["scale_arcsec"] * geo.scale
         arcmin = _nice_length(0.25 * w / px_per_arcmin)
@@ -224,10 +226,11 @@ def draw(image: np.ndarray, solution: dict[str, Any], objects: tuple[DeepSkyObje
         gd.line([(x1 - length, y1), (x1, y1)], fill=255, width=lw + 1)
         for xx in (x1 - length, x1):
             gd.line([(xx, y1 - fsize * 0.4), (xx, y1 + fsize * 0.4)], fill=255, width=lw + 1)
-        text = f"{arcmin:g}′" if arcmin < 60 else f"{arcmin / 60:g}°"
+        text = f"{arcmin:g}'" if arcmin < 60 else f"{arcmin / 60:g}°"  # ASCII arcminute mark: the built-in font has no ′
         tb = gd.textbbox((0, 0), text, font=font)
         gd.text((x1 - length / 2 - (tb[2] - tb[0]) / 2, y1 - fsize * 1.5), text, font=font, fill=255)
         drawn["scale_bar"] = {"arcmin": arcmin, "pixels": length}
+        drawn["reserved"].append((x1 - length - fsize * 0.5, y1 - fsize * 1.7, x1 + fsize * 0.5, y1 + fsize * 0.6))
     for mask, color in ((obj_mask, OBJECT_COLOR), (guide_mask, GUIDE_COLOR)):
         a = np.asarray(mask, dtype=np.uint32)
         if not a.any():

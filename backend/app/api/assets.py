@@ -19,7 +19,7 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..db import new_id, now
-from ..models.api import BackgroundIn, ImportIn, InterpretationIn, LivePreviewIn, PresetPreviewsIn, RegionsIn, SkySolveIn
+from ..models.api import BackgroundIn, CurrentRunIn, ImportIn, InterpretationIn, LivePreviewIn, PresetPreviewsIn, RegionsIn, SkySolveIn
 from ..processing.imagedata import ProcessingError
 from ..processing.catalog_color import MAX_BYTES, parse_catalog
 from ..processing.color import luminance
@@ -31,6 +31,7 @@ from ..processing.readers import detect_format, evaluate_intake, inspect_file
 from ..processing.recipe import ObjectColorRecipe
 from ..processing.star_protection import detect_stars
 from ..services import previews
+from ..services.results import set_current
 from .common import (
     ApiError, asset_hubble_input, cfg_of, coord_of, db_of, get_asset, run_worker_task, serialize_asset, sky_solution_summary,
 )
@@ -325,6 +326,20 @@ async def preview_object_color(request: Request, asset_id: str, body: ObjectColo
     except ProcessingError as exc:
         raise ApiError(422, exc.code, exc.message) from exc
     return Response(data, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@router.put("/{asset_id}/current-run")
+def choose_current_run(request: Request, asset_id: str, body: CurrentRunIn) -> dict[str, Any]:
+    """Go back to an earlier result: it becomes the one shown, downloaded and zipped. Nothing is reprocessed."""
+    db = db_of(request)
+    get_asset(request, asset_id)
+    run = db.one("SELECT id, state FROM runs WHERE id=? AND asset_id=?", (body.run_id, asset_id))
+    if not run:
+        raise ApiError(404, "RUN_NOT_FOUND", "That result no longer exists for this image.")
+    if db.one("SELECT 1 AS x FROM job_items WHERE asset_id=? AND state IN ('queued','running')", (asset_id,)):
+        raise ApiError(409, "ASSET_BUSY", "This image is being enhanced. Wait until it finishes, then try again.")
+    set_current(db, asset_id, run["id"])
+    return serialize_asset(db, coord_of(request), cfg_of(request), get_asset(request, asset_id))
 
 
 @router.get("/{asset_id}")
