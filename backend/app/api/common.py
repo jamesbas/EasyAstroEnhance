@@ -140,6 +140,7 @@ def serialize_asset(db: Database, coord: Coordinator, cfg: Config, a: dict[str, 
             "defective_pixels": ((r.get("calibration") or {}).get("defective_pixels") or {}).get("count"),
             "mosaic_canvas": (r.get("mosaic") or {}).get("canvas"),
             "saturation_warning": (r.get("saturation") or {}).get("warning"),
+            "color_balance": r.get("color_balance"),
         }
     status = a["status"]
     if status == "failed":

@@ -16,6 +16,13 @@ export function StackInfo({ asset }: { asset: Asset }) {
       {s.saturation_warning && <p className="warn-text small" data-testid="stack-saturation">{s.saturation_warning}</p>}
       <ul className="small">
         {s.mode === 'subs' && <li>Calibration: {cal.length ? cal.join(', ') : 'none'}{s.defective_pixels ? ` · ${s.defective_pixels} hot/cold pixels repaired` : ''}</li>}
+        {s.color_balance && (
+          <li data-testid="stack-info-color">
+            {s.color_balance.status === 'applied' && s.color_balance.gains_rgb
+              ? `Colour balanced to a neutral sky (red × ${s.color_balance.gains_rgb[0].toFixed(2)}, blue × ${s.color_balance.gains_rgb[2].toFixed(2)})`
+              : `Colour balance ${s.color_balance.status === 'off' ? 'off' : 'skipped'}: ${s.color_balance.reason}`}
+          </li>
+        )}
         <li>Stacking took {Math.round(s.seconds)} s.</li>
         {s.rejected_frames.map((r) => <li key={r.name}>Skipped {r.name}: {r.reason}</li>)}
       </ul>

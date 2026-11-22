@@ -3,6 +3,14 @@
 Historical performance baselines: engine **1.2.0**, recipe schema **4** · measured on the target PC (Windows 11, Intel Core Ultra 9 285K,
 64 GB RAM, NVIDIA GeForce RTX 5070 Ti 16 GB, driver 610.62 / CUDA 13.3, Python 3.12.10).
 
+## Engine 1.7.2 — stacks colour-balanced like Seestar stacks (spec amendment 1.13, stacker 1.1.0)
+
+| Item | Result |
+|---|---|
+| Cause of the red stacks | User's IC 1805 (117 IRCUT subs, 2× drizzle): the app stack was raw camera colour — sky R/G/B 1190 / 843 / 821, star R/G 1.46 — while the Seestar's own stack is sky-neutral (851 / 859 / 858, star R/G 1.08). Raw S30 IRCUT subs are ~1.4× red; the enhancement's star white balance is bounded at 1.25×, so it could not remove the cast. |
+| Fix | After integration, one gain per channel (green 1) makes the median sky of the dimmer half (4 × 4 block means) neutral; skipped with a reason when the sky is < 5σ above zero or gains fall outside 0.4–2.5; switchable in Advanced; recorded in the report, `CBAL_R/G/B` and `HISTORY`. Real IC 1805 re-stacked: gains R 0.713, B 1.028 (the Seestar's implied R gain ≈ 0.71); sky 847 / 844 / 845; linked display stretch now matches the Seestar stack. |
+| Tests | Backend 304 passed (new gain and skip tests in `test_stacking.py`); Playwright stacking spec passed. |
+
 ## Engine 1.7.1 — AI sharpening without grain (spec amendment 1.12)
 
 | Item | Result |

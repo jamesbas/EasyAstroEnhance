@@ -103,7 +103,7 @@ async def create_stack(request: Request, body: StackCreate) -> dict[str, Any]:
         return {**serialize_stack(db, coord, existing), "idempotent_replay": True}
     if body.auto_enhance and body.recipe is None:
         raise ApiError(422, "RECIPE_REQUIRED", "Choose the enhancement settings to use after stacking, or turn off automatic enhancement.")
-    req = _request_of(body, scale=body.scale, grading=body.grading, rejection=body.rejection)
+    req = _request_of(body, scale=body.scale, grading=body.grading, rejection=body.rejection, color_balance=body.color_balance)
     p = await _plan(req)
     if not p["can_stack"]:
         raise ApiError(422, "NOTHING_TO_STACK", "This folder does not hold at least two light frames that can be stacked together.", p)

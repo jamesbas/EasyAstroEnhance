@@ -63,8 +63,9 @@ def test_registration_recovers_rotation_and_shift(tmp_path):
 def test_stack_removes_trail_and_hot_pixels_and_reduces_noise(tmp_path):
     _make_subs(tmp_path / "subs", n=8)
     out = tmp_path / "stack.fits"
-    rep = run_stack(StackRequest(folder=str(tmp_path / "subs")), out, lambda: None, lambda *_: None, device="cpu")
+    rep = run_stack(StackRequest(folder=str(tmp_path / "subs"), color_balance=False), out, lambda: None, lambda *_: None, device="cpu")
     assert rep["mode"] == "subs" and rep["frames_used"] == 8
+    assert rep["color_balance"]["status"] == "off"
     assert rep["calibration"]["defective_pixels"]["count"] >= len(HOT)
     img = _read_stack(out)
     assert img.shape == (H, W, 3)
@@ -87,6 +88,38 @@ def test_stack_removes_trail_and_hot_pixels_and_reduces_noise(tmp_path):
         d = np.diff(a[60:-60, 60:-60, 1], axis=1)
         return np.median(np.abs(d - np.median(d))) * 1.4826
     assert noise(img) < 0.6 * noise(single)
+
+
+def test_color_balance_neutralizes_sky_with_gains(tmp_path):
+    """Default stacks are balanced like Seestar stacks: one gain per channel (green 1) makes the sky neutral, so star
+    colours are scaled by the same gains (not shifted), and the gains are recorded in the report and header."""
+    _make_subs(tmp_path / "subs", n=6, trail_frame=None)
+    req = StackRequest(folder=str(tmp_path / "subs"))
+    rep = run_stack(req, tmp_path / "b.fits", lambda: None, lambda *_: None, device="cpu")
+    raw_rep = run_stack(StackRequest(folder=str(tmp_path / "subs"), color_balance=False), tmp_path / "r.fits", lambda: None, lambda *_: None, device="cpu")
+    cb = rep["color_balance"]
+    assert cb["status"] == "applied" and raw_rep["color_balance"]["status"] == "off"
+    expected = (SKY[1] + BIAS) / (SKY + BIAS)
+    assert np.allclose(cb["gains_rgb"], expected, rtol=0.01) and cb["gains_rgb"][1] == 1.0
+    bal, raw = _read_stack(tmp_path / "b.fits"), _read_stack(tmp_path / "r.fits")
+    sky = np.nanmedian(bal[30:-30, 40:-40].reshape(-1, 3), axis=0)
+    assert np.allclose(sky, SKY[1] + BIAS, rtol=0.01)
+    both = np.isfinite(bal) & np.isfinite(raw)
+    assert np.allclose(bal[both], (raw * np.asarray(cb["gains_rgb"]))[both], rtol=1e-5, atol=1e-2)
+    with fits.open(tmp_path / "b.fits") as hdul:
+        h = hdul[0].header
+        assert h["CBAL_G"] == 1.0 and abs(h["CBAL_R"] - cb["gains_rgb"][0]) < 1e-6
+        assert any("Colour balance: gains" in str(x) for x in h["HISTORY"])
+
+
+def test_color_balance_skips_dark_calibrated_sky():
+    from app.processing.stacking.integrate import sky_color_balance
+
+    rng = np.random.default_rng(1)
+    img = rng.normal(0, 10, (200, 200, 3)).astype(np.float32) + np.array([2.0, 40.0, 30.0], np.float32)
+    gains, info = sky_color_balance(img)
+    assert gains is None and info["status"] == "skipped" and "too dark" in info["reason"]
+    assert sky_color_balance(img[..., 0])[1]["status"] == "skipped"
 
 
 def test_cloudy_frame_rejected_with_reason(tmp_path):
@@ -130,7 +163,7 @@ def test_drizzle_doubles_resolution_and_reports_fill(tmp_path):
     assert img.shape == (2 * H, 2 * W, 3)
     assert rep["drizzle"]["scale"] == 2 and 0 <= rep["drizzle"]["filled_from_native_fraction"] < 0.5
     sky = np.nanmedian(img[60:-60, 80:-80].reshape(-1, 3), axis=0)
-    assert np.allclose(sky, SKY + BIAS, rtol=0.03)
+    assert np.allclose(sky, SKY[1] + BIAS, rtol=0.03)  # colour-balanced to a neutral sky (green unchanged)
 
 
 def test_cancel_stops_stacking(tmp_path):

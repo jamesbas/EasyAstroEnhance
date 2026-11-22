@@ -36,7 +36,9 @@ combine them first. Everything runs locally and leaves my original files alone.
   shape and sky brightness, explains why it skips poor or unaligned frames, and lines up the rest on the stars,
   even when the field has rotated. It repairs persistent hot or cold pixels, and averaging with outlier rejection
   can help remove passing satellite or aircraft trails. I can choose native size or optional 2× drizzle for suitable
-  data; drizzle uses the captured frames, not AI upscaling.
+  data; drizzle uses the captured frames, not AI upscaling. Like the Seestar's own stacks, the result is colour
+  balanced to a neutral sky (one gain per colour, shown in the stack details); raw camera colour from a Seestar is
+  strongly red, so this can be switched off in Advanced if I want it.
 - **Several nights:** I can combine already-stacked FITS images of the same target. The app aligns them even if the
   image scales differ and gives stacks with more exposure time more weight.
 - **Mosaics:** a Seestar mosaic `_sub` folder is recognised, and the result covers every panel.

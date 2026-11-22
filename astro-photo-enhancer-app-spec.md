@@ -1,6 +1,10 @@
 # EasyAstroEnhance — Application Development Specification
 
-Version 1.12 • November 21, 2026 • Prepared for Jaime Basilico
+Version 1.13 • November 22, 2026 • Prepared for Jaime Basilico
+
+> **Amendment 1.13 (engine 1.7.2, stacker 1.1.0, recipe schema unchanged).** Stacked colour sub-frames are colour
+> balanced to a neutral sky like the Seestar's own stacks (one recorded gain per channel, green 1; skippable in the
+> stack dialog's Advanced). See §4 "Stacking", Subs pipeline.
 
 > **Amendment 1.12 (engine 1.7.1, recipe schema unchanged).** AI sharpening no longer turns smooth, denoised areas into
 > grain: its gate measures against the noise before any noise reduction, sharpens only fine structure that stands above
@@ -180,7 +184,14 @@ These constants apply to the rendered baseline only. They are not valid physical
   has a reason) → star registration (triangle invariants + RANSAC similarity: rotation, scale, shift, which covers alt-az
   field rotation) → bilinear debayer → additive per-channel background normalization → bilinear resampling onto the
   reference frame → noise-weighted (1/σ²) mean with iterative kappa-sigma rejection (exact, median-centred, for up to 40
-  frames that fit the RAM budget; two-pass streaming otherwise).
+  frames that fit the RAM budget; two-pass streaming otherwise). *(Amended — stack 1.1.0: colour sub-frames are then
+  colour balanced like the Seestar's own stacks — one gain per channel, green 1, that makes the median sky of the dimmer
+  half of the frame (4 × 4 block means) neutral, because raw camera colour is strongly tinted (a Seestar S30 sky through
+  its IR-cut filter is ~1.4× brighter in red). It is skipped with a reason when the sky is not at least 5σ above zero in
+  every channel or the gains fall outside 0.4–2.5, can be switched off in the stack dialog's Advanced section (camera
+  colour kept), and is recorded in the stack report, `CBAL_R/G/B` header keywords and `HISTORY`. These are the
+  bounded, recorded linear gains allowed by amendment 1.3; the enhancement's own neutralization and white balance still
+  run afterwards.)*
 - **2× drizzle (optional, subs only):** Bayer drizzle with a point kernel and bilinear weights of measured CFA samples only,
   rejection against the native statistics; output pixels no frame reached are filled from the upsampled native stack and
   the filled fraction is reported.
@@ -190,7 +201,8 @@ These constants apply to the rendered baseline only. They are not valid physical
   with no coverage are NaN (masked by the reader). The file becomes a new immutable original with state "linear stack".
   A stack report (frames used/rejected with reasons, calibration, registration, normalization, weights, rejection,
   timing, device) is stored with the stack.
-- **Fidelity:** every output value is a weighted mean of measured, resampled pixel values; nothing is synthesized. The
+- **Fidelity:** every output value is a weighted mean of measured, resampled pixel values (times the recorded per-channel
+  colour-balance gain, when applied); nothing is synthesized. The
   only interpolation is bilinear debayering/resampling (and the disclosed drizzle hole filling).
 - **Scheduling:** stacks share the single worker with enhancement jobs (oldest first), report progress, can be cancelled
   and retried, are marked interrupted after a restart, and are removed by Clear local history. Debayering and

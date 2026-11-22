@@ -22,6 +22,8 @@ Schema 10 (engine 1.7): Accurate star colours from the built-in catalog (``catal
 tools off and banding reduction on (measured; skipped when no banding is found).
 Engine 1.7.1 (schema unchanged): AI sharpening's signal gate measures noise before any noise reduction, so faint areas
 that noise reduction smoothed are no longer sharpened into grain.
+Engine 1.7.2 (schema unchanged, no enhancement change): stacker 1.1.0 colour-balances stacked colour sub-frames to a
+neutral sky (per-channel gains, recorded), so app stacks are no longer red in camera colour.
 """
 from __future__ import annotations
 
@@ -29,7 +31,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-PIPELINE_VERSION = "1.7.1"
+PIPELINE_VERSION = "1.7.2"
 RECIPE_SCHEMA_VERSION = 10
 MIGRATABLE_SCHEMAS = {3, 4, 5, 6, 7, 8, 9}
 

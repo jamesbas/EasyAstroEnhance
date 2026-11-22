@@ -29,6 +29,7 @@ test.describe('stacking', () => {
     await expect(page.getByTestId('stack-summary')).toContainText('hot pixels are still removed automatically');
     await expect(page.getByTestId('stack-auto-enhance')).not.toBeChecked();  // default: look and adjust first
     await expect(page.getByTestId('stack-scale-native')).toBeChecked();
+    await expect(page.getByTestId('stack-color-balance')).toBeChecked();  // in Advanced; default like Seestar stacks
     await page.getByTestId('stack-start').click();
     await expect(dialog).toBeHidden();
     const card = page.getByTestId('asset-card').first();
@@ -38,6 +39,7 @@ test.describe('stacking', () => {
     await expect(page.getByTestId('stack-banner')).toBeHidden();
     await expect(page.getByTestId('enhance-selected')).toBeEnabled();
     await expect(page.getByTestId('stack-info')).toContainText('Stacked 6 of 6 frames');
+    await expect(page.getByTestId('stack-info-color')).toContainText('Colour balanced to a neutral sky');
     // The stacked folder is offered again next time.
     await page.getByTestId('stack-button').click();
     await page.getByTestId('stack-folder').fill('');

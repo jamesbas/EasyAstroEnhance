@@ -159,7 +159,7 @@ frontend/ (React + TypeScript + Vite)         backend/app/
 * On the CPU, the pixel stages run on parallel tiles whose overlap covers every chained filter, so the result is
   bit-for-bit the same as one full-frame pass; independent analysis steps also run in parallel.
 
-### Processing method disclosure (engine 1.7.1, recipe schema 10 — one-button Enhance)
+### Processing method disclosure (engine 1.7.2, recipe schema 10 — one-button Enhance)
 
 Press **Enhance**. The default preset, **Auto**, measures each image (a bright extended core, faint extended signal,
 star density) on a small binned copy and applies one of the built-in looks — Moon & planets, Bright core (HDR), Faint
@@ -345,7 +345,10 @@ stacking finishes* (off by default), so you can look at it and adjust the settin
   or tagged by `IMAGETYP` in the same folder) → fixed hot/cold pixel repair (found on the master dark, or on a median of
   the lights) → frame measurement and grading (clouds, trailing, bloated stars, bright sky; each skipped frame has a
   reason) → star alignment (triangle matching + RANSAC; handles alt-az field rotation) → bilinear debayer →
-  background matching → noise-weighted average with kappa-sigma rejection (removes satellite/plane trails).
+  background matching → noise-weighted average with kappa-sigma rejection (removes satellite/plane trails) → colour
+  balance to a neutral sky, like the Seestar's own stacks (one gain per colour, green unchanged; raw Seestar camera colour
+  is ~1.4× red — on 117 IC 1805 subs the gains were red × 0.71, blue × 1.03; skipped with a reason when the sky is too
+  dark; Advanced → untick to keep camera colour; recorded in `CBAL_R/G/B` and the stack details).
   Output: native size, or optional **2× drizzle** (Bayer drizzle; uncovered pixels are filled from the native stack and
   the fraction is reported).
 * **Stacked images from several nights** (a folder of Seestar `Stacked_*.fit` of one target): aligned at any scale,

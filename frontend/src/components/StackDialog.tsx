@@ -80,6 +80,7 @@ export function StackDialog({ recipe, settingsLabel, presetId, onClose, onStarte
   const [scale, setScale] = useState<1 | 2>(1);
   const [grading, setGrading] = useState<StackGrading>('standard');
   const [rejection, setRejection] = useState(true);
+  const [colorBalance, setColorBalance] = useState(true);
   const [autoEnhance, setAutoEnhance] = useState(initialAutoEnhance);
   const [mosaic, setMosaic] = useState<boolean | null>(null);
   const [browsing, setBrowsing] = useState(false);
@@ -129,6 +130,7 @@ export function StackDialog({ recipe, settingsLabel, presetId, onClose, onStarte
         scale,
         grading,
         rejection: rejection ? 'sigma' : 'none',
+        color_balance: colorBalance,
         mosaic: plan.mosaic && mosaic !== null ? mosaic : null,
         auto_enhance: autoEnhance,
         recipe: autoEnhance ? recipe : null,
@@ -230,6 +232,12 @@ export function StackDialog({ recipe, settingsLabel, presetId, onClose, onStarte
               <input type="checkbox" checked={rejection} onChange={(e) => setRejection(e.target.checked)} data-testid="stack-rejection" />
               Remove satellite and airplane trails (outlier rejection)
             </label>
+            {plan.mode === 'subs' && plan.lights.layout === 'cfa' && (
+              <label className="check">
+                <input type="checkbox" checked={colorBalance} onChange={(e) => setColorBalance(e.target.checked)} data-testid="stack-color-balance" />
+                Balance colours to a neutral sky, like Seestar stacks (off: keep the camera's raw colour)
+              </label>
+            )}
           </details>
 
           <label className="check">

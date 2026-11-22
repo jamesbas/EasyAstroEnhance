@@ -10,7 +10,7 @@ from .calibrate import build_calibration
 from .frames import FrameInfo, choose_lights, detect_mosaic, scan_folder, summarize
 from .integrate import StackOptions, stack_sessions, stack_subs, write_stack_fits
 
-STACK_VERSION = "1.0.0"
+STACK_VERSION = "1.1.0"
 CAL_KINDS = {"darks": "dark", "flats": "flat", "bias": "bias", "darkflats": "darkflat"}
 
 
@@ -26,6 +26,7 @@ class StackRequest:
     grading: str = "standard"
     rejection: str = "sigma"
     mosaic: bool | None = None  # None = detect from the frames (sub-frames only)
+    color_balance: bool = True  # colour subs: neutral sky like the Seestar's own stacks (False = camera colour)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -108,7 +109,8 @@ def run_stack(req: StackRequest, out_path: Path, check: Callable[[], None], prog
         raise ProcessingError("BAD_SCALE", "Output size must be native (1x) or 2x drizzle.")
     mosaic = mode == "subs" and (detect_mosaic(lights)[0] if req.mosaic is None else req.mosaic)
     opts = StackOptions(mode=mode, scale=req.scale if mode == "subs" else 1, grading=req.grading, rejection=req.rejection,
-                        device=device, threads=threads, memory_budget_bytes=memory_budget_bytes, mosaic=mosaic)
+                        device=device, threads=threads, memory_budget_bytes=memory_budget_bytes, mosaic=mosaic,
+                        color_balance=req.color_balance)
     if mode == "subs":
         progress("Preparing calibration", 0.0)
         cal = build_calibration(lights, groups["dark"], groups["flat"], groups["bias"], groups["darkflat"], check,
@@ -125,5 +127,9 @@ def run_stack(req: StackRequest, out_path: Path, check: Callable[[], None], prog
     if rep.get("calibration"):
         c = rep["calibration"]
         history.append(f"Calibration: darks {c['darks']}, flats {c['flats']}, bias {c['bias']}, dark-flats {c['dark_flats']}")
+    cb = rep.get("color_balance")
+    if cb:
+        history.append("Colour balance: gains R {:.3f} G {:.3f} B {:.3f} (neutral sky)".format(*cb["gains_rgb"]) if cb["status"] == "applied"
+                       else f"Colour balance {cb['status']}: {cb['reason']}")
     write_stack_fits(out_path, result, history)
     return rep

@@ -17,10 +17,15 @@ transforms are chained; the output canvas is the union of all aligned frames (ca
 frame), and pixels no frame covered are left empty (NaN, reported). Panels are levelled by the same per-channel
 background offset as any sub-frame; no seam blending or per-panel gradient model is applied.
 
+Colour balance (colour subs, on by default): the integrated stack is multiplied by one gain per channel (green 1) that
+makes the sky neutral, like the Seestar's own stacks; skipped with a reason when the sky is too faint, recorded in the
+report and the ``CBAL_R/G/B`` header keywords.
+
 Stacked images from different nights ("sessions"): registered (any scale), resampled onto the largest image,
 background-matched and combined, weighted by integration time, with kappa-sigma rejection from three images on.
 
-Nothing is generated: every output value is a weighted mean of measured, resampled pixel values.
+Nothing is generated: every output value is a weighted mean of measured, resampled pixel values (times the recorded
+per-channel colour-balance gain).
 """
 from __future__ import annotations
 
@@ -59,6 +64,44 @@ class StackOptions:
     device: str = "auto"  # auto | gpu | cpu
     threads: int = 4
     mosaic: bool = False  # subs: union canvas over all frames, chained registration
+    color_balance: bool = True  # subs (colour): per-channel gains that make the sky neutral, as the Seestar's own stacks are
+
+
+BALANCE_BIN = 4  # sky colour is measured on 4 x 4 block means, so pixel noise barely biases the dim-half selection
+BALANCE_GAIN_RANGE = (0.4, 2.5)
+BALANCE_MIN_SKY_SNR = 5.0
+
+
+def sky_color_balance(data: np.ndarray) -> tuple[np.ndarray | None, dict[str, Any]]:
+    """Per-channel gains (green = 1) that make the sky background neutral.
+
+    Raw colour sub-frames carry the sensor's colour response and the sky glow (a Seestar S30 sky through its IR-cut
+    filter is ~1.4x brighter in red), so a stack in camera colour looks strongly tinted; the Seestar's own stacks are
+    balanced this way. The sky is the median of the dimmer half (by luminance) of 4 x 4 block means of covered pixels.
+    Skipped with a reason when the sky is not clearly above the noise or would need extreme gains."""
+    def skip(reason: str) -> tuple[None, dict[str, Any]]:
+        return None, {"status": "skipped", "reason": reason}
+
+    if data.ndim != 3 or data.shape[2] != 3:
+        return skip("Monochrome frames have no colour to balance.")
+    b = BALANCE_BIN
+    h, w = (data.shape[0] // b) * b, (data.shape[1] // b) * b
+    blocks = data[:h, :w].reshape(h // b, b, w // b, b, 3).mean(axis=(1, 3), dtype=np.float64).reshape(-1, 3)
+    blocks = blocks[np.isfinite(blocks).all(axis=1)]
+    if len(blocks) < 1000:
+        return skip("Too little of the image is covered to measure the sky colour.")
+    lum = blocks.mean(axis=1)
+    dim = blocks[lum <= np.median(lum)]
+    sky = np.median(dim, axis=0)
+    noise = np.median(np.abs(dim - sky), axis=0) * MAD_TO_SIGMA
+    if (sky <= BALANCE_MIN_SKY_SNR * np.maximum(noise, 1e-9)).any():
+        return skip("The sky is too dark (close to zero after calibration) in at least one colour to set the colour balance; camera colour kept.")
+    gains = sky[1] / sky
+    lo, hi = BALANCE_GAIN_RANGE
+    if (gains < lo).any() or (gains > hi).any():
+        return skip(f"The sky colour would need gains outside {lo}-{hi} (R {gains[0]:.2f}, B {gains[2]:.2f}); camera colour kept.")
+    return gains, {"status": "applied", "method": "per-channel gains that make the median sky of the dimmer half neutral (green unchanged)",
+                   "sky_before": sky.tolist(), "gains_rgb": gains.tolist()}
 
 
 def compose(t2: Transform, t1: Transform) -> Transform:
@@ -342,7 +385,17 @@ def stack_subs(lights: list[FrameInfo], cal: Calibration, opts: StackOptions, ch
     rep["seconds"] = round(time.perf_counter() - t0, 2)
     data = out if C == 3 else out[..., 0]
     data = np.where((cov > 0)[..., None] if data.ndim == 3 else cov > 0, data, np.nan).astype(np.float32)
-    hdr = _header_for(headers[ref] if headers[ref] is not None else read_frame(lights[ref])[1], lights, used, ("subs" if opts.scale == 1 else "subs-drizzle2x") + ("-mosaic" if opts.mosaic else ""), {})
+    extra: dict[str, Any] = {}
+    if C == 3:
+        if opts.color_balance:
+            gains, rep["color_balance"] = sky_color_balance(data)
+            if gains is not None:
+                for c in range(3):
+                    data[..., c] *= np.float32(gains[c])
+                extra = {f"CBAL_{ch}": (float(g), "sky colour-balance gain applied") for ch, g in zip("RGB", gains)}
+        else:
+            rep["color_balance"] = {"status": "off", "reason": "Camera colour kept (colour balance switched off)."}
+    hdr = _header_for(headers[ref] if headers[ref] is not None else read_frame(lights[ref])[1], lights, used, ("subs" if opts.scale == 1 else "subs-drizzle2x") + ("-mosaic" if opts.mosaic else ""), extra)
     if C == 1:
         del hdr["CTYPE3"]
     return StackResult(data, cov, hdr, rep)

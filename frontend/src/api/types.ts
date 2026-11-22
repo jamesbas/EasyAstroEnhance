@@ -530,6 +530,7 @@ export interface StackCreateBody extends StackFolders {
   scale: 1 | 2;
   grading: StackGrading;
   rejection: 'sigma' | 'none';
+  color_balance?: boolean;
   mosaic?: boolean | null;
   auto_enhance: boolean;
   recipe: Recipe | null;
@@ -618,6 +619,7 @@ export interface AssetStackInfo {
   defective_pixels: number | null;
   mosaic_canvas?: [number, number] | null;
   saturation_warning?: string | null;
+  color_balance?: { status: 'applied' | 'skipped' | 'off'; reason?: string | null; gains_rgb?: [number, number, number] } | null;
 }
 
 export interface JobCreateBody {

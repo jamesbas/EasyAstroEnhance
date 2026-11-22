@@ -74,6 +74,7 @@ class StackCreate(StackFolders):
     scale: Literal[1, 2] = 1
     grading: Literal["off", "lenient", "standard", "strict"] = "standard"
     rejection: Literal["sigma", "none"] = "sigma"
+    color_balance: bool = True
     auto_enhance: bool = False
     recipe: Recipe | None = None
     preset_id: str | None = None
